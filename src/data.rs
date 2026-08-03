@@ -1,71 +1,267 @@
-/// A bucket entry.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Data<'tx> {
-    Bucket(BucketName<'tx>),
-    KeyValue(KVPair<'tx>),
+use std::marker::PhantomData;
+
+use crate::{bytes::Bytes, node::Leaf, ToBytes};
+
+/// Key / Value or Bucket Data
+///
+/// The two enum variants represent either a key / value pair or a nested bucket.
+/// If you want to access the underneath data, you must match the variant first.
+///
+/// # Examples
+///
+/// ```no_run
+/// use inspace::{DB, Data};
+/// # use inspace::Error;
+///
+/// # fn main() -> Result<(), Error> {
+/// let db = DB::open("my.db")?;
+/// let mut tx = db.tx(true)?;
+/// let bucket = tx.create_bucket("my-bucket")?;
+///
+/// if let Some(data) = bucket.get("my-key") {
+///     match data {
+///         Data::Bucket(b) => assert_eq!(b.name(), b"my-key"),
+///         Data::KeyValue(kv) => assert_eq!(kv.key(), b"my-key"),
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Data<'b, 'tx> {
+    /// Contains data about a nested bucket
+    Bucket(BucketName<'b, 'tx>),
+    /// a key / value pair of bytes
+    KeyValue(KVPair<'b, 'tx>),
 }
 
-impl<'tx> Data<'tx> {
+impl<'b, 'tx> Data<'b, 'tx> {
+    /// Checks if the `Data` is a `KVPair`
     pub fn is_kv(&self) -> bool {
-        matches!(self, Self::KeyValue(_))
+        matches!(self, Data::KeyValue(_))
     }
 
-    pub fn kv(&self) -> &KVPair<'tx> {
-        match self {
-            Self::KeyValue(pair) => pair,
-            Self::Bucket(_) => panic!("entry is a bucket"),
+    /// Asserts that the `Data` is a `KVPair` and returns the inner data
+    ///
+    /// Panics if the data is a Bucket.
+    pub fn kv(&self) -> &KVPair {
+        if let Self::KeyValue(kv) = self {
+            return kv;
         }
+        panic!("Cannot get KVPair from BucketData");
     }
 
     pub fn key(&self) -> &[u8] {
         match self {
-            Self::Bucket(bucket) => bucket.name(),
-            Self::KeyValue(pair) => pair.key(),
+            Self::Bucket(b) => b.name(),
+            Self::KeyValue(kv) => kv.key(),
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct BucketName<'tx> {
-    name: &'tx [u8],
+impl<'b, 'tx> From<Leaf<'tx>> for Data<'b, 'tx> {
+    fn from(val: Leaf<'tx>) -> Self {
+        match val {
+            Leaf::Bucket(name, _) => Data::Bucket(BucketName::new(name)),
+            Leaf::Kv(key, value) => Data::KeyValue(KVPair::new(key, value)),
+        }
+    }
 }
 
-impl<'tx> BucketName<'tx> {
-    pub(crate) fn new(name: &'tx [u8]) -> Self {
-        Self { name }
+/// Bucket name
+///
+/// This data type signifies that a given key is associated with a nested bucket.
+/// You can access the key using the `name` function.
+/// The BucketData itself can be used to retreive the bucket using the `get_bucket`
+/// function without copying the bytes for the key.
+///
+/// # Examples
+///
+/// ```no_run
+/// use inspace::{DB, Data};
+/// # use inspace::Error;
+///
+/// # fn main() -> Result<(), Error> {
+/// let db = DB::open("my.db")?;
+/// let mut tx = db.tx(true)?;
+/// let bucket = tx.create_bucket("my-bucket")?;
+///
+/// bucket.create_bucket("my-nested-bucket")?;
+/// if let Some(data) = bucket.get("my-nested-bucket") {
+///     if let Data::Bucket(b) = data {
+///         let name: &[u8] = b.name();
+///         assert_eq!(name, b"my-nested-bucket");
+///         let nested_bucket = bucket.get_bucket(&b).unwrap();
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BucketName<'b, 'tx> {
+    name: Bytes<'tx>,
+    _phantom: PhantomData<&'b ()>,
+}
+
+impl<'b, 'tx> BucketName<'b, 'tx> {
+    pub(crate) fn new(name: Bytes<'tx>) -> Self {
+        BucketName {
+            name,
+            _phantom: PhantomData,
+        }
     }
 
-    pub fn name(&self) -> &'tx [u8] {
+    /// Returns the name of the bucket as a byte slice.
+    pub fn name(&self) -> &[u8] {
+        self.name.as_ref()
+    }
+}
+
+impl<'b, 'tx> ToBytes<'tx> for BucketName<'b, 'tx> {
+    fn to_bytes(self) -> Bytes<'tx> {
         self.name
     }
 }
 
-impl AsRef<[u8]> for BucketName<'_> {
-    fn as_ref(&self) -> &[u8] {
-        self.name
+impl<'b, 'tx> ToBytes<'tx> for &BucketName<'b, 'tx> {
+    fn to_bytes(self) -> Bytes<'tx> {
+        self.name.clone()
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct KVPair<'tx> {
-    key: &'tx [u8],
-    value: &'tx [u8],
+/// Key / Value Pair
+///
+/// You can use the [`key`](#method.key) and [`value`](#method.value) methods to access the underlying byte slices.
+/// The data is only valid for the life of the transaction,
+/// so make a copy if you want to keep it around longer than that.
+///
+/// # Examples
+///
+/// ```no_run
+/// use inspace::{DB, Data};
+/// # use inspace::Error;
+///
+/// # fn main() -> Result<(), Error> {
+/// let db = DB::open("my.db")?;
+/// let mut tx = db.tx(false)?;
+/// let bucket = tx.get_bucket("my-bucket")?;
+///
+/// // put a key / value pair into the bucket
+/// bucket.put("my-key", "my-value")?;
+/// if let Some(data) = bucket.get("my-key") {
+///     if let Data::KeyValue(kv) = data {
+///         let key: &[u8] = kv.key();
+///         let value: &[u8] = kv.value();
+///         assert_eq!(key, b"my-key");
+///         assert_eq!(value, b"my-value");
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KVPair<'b, 'tx> {
+    key: Bytes<'tx>,
+    value: Bytes<'tx>,
+    _phantom: PhantomData<&'b ()>,
 }
 
-impl<'tx> KVPair<'tx> {
-    pub(crate) fn new(key: &'tx [u8], value: &'tx [u8]) -> Self {
-        Self { key, value }
+impl<'b, 'tx> KVPair<'b, 'tx> {
+    pub(crate) fn new(key: Bytes<'tx>, value: Bytes<'tx>) -> Self {
+        KVPair {
+            key,
+            value,
+            _phantom: PhantomData,
+        }
     }
 
-    pub fn key(&self) -> &'tx [u8] {
-        self.key
+    /// Returns the key of the key / value pair as a byte slice.
+    pub fn key(&self) -> &[u8] {
+        self.key.as_ref()
     }
 
-    pub fn value(&self) -> &'tx [u8] {
-        self.value
+    /// Returns the value of the key / value pair as a byte slice.
+    pub fn value(&self) -> &[u8] {
+        self.value.as_ref()
     }
 
-    pub fn kv(&self) -> (&'tx [u8], &'tx [u8]) {
-        (self.key, self.value)
+    /// Returns the key / value pair as a tuple of slices.
+    pub fn kv(&self) -> (&[u8], &[u8]) {
+        (self.key(), self.value())
     }
+}
+
+impl<'b, 'tx> From<(Bytes<'tx>, Bytes<'tx>)> for KVPair<'b, 'tx> {
+    fn from(val: (Bytes<'tx>, Bytes<'tx>)) -> Self {
+        KVPair::new(val.0, val.1)
+    }
+}
+
+impl<'b, 'tx> From<Leaf<'tx>> for Option<KVPair<'b, 'tx>> {
+    fn from(val: Leaf<'tx>) -> Self {
+        match val {
+            Leaf::Bucket(_, _) => None,
+            Leaf::Kv(key, value) => Some(KVPair::new(key, value)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_kv_pair() {
+        let k = vec![1, 2, 3, 4];
+        let v = vec![5, 6, 7, 8, 9, 0];
+
+        let kv = KVPair::new(Bytes::Slice(&k), Bytes::Slice(&v));
+        assert_eq!(kv.key(), &k[..]);
+        assert_eq!(kv.value(), &v[..]);
+
+        let kv = KVPair::new(Bytes::Slice(&k), Bytes::Slice(&v));
+        assert_eq!(kv.key(), &k[..]);
+        assert_eq!(kv.value(), &v[..]);
+    }
+
+    // #[test]
+    // fn test_bucket_data() {
+    //     let name = b"Hello Bucket!";
+    //     let meta = BucketMeta {
+    //         root_page: 3,
+    //         next_int: 24_985_738_796,
+    //     };
+
+    //     let b = BucketData::new(Bytes::Slice(name), meta);
+    //     assert_eq!(b.name(), name);
+    //     assert_eq!(b.meta().root_page, meta.root_page);
+    //     assert_eq!(b.meta().next_int, meta.next_int);
+    //     assert_eq!(b.size(), 13 + std::mem::size_of_val(&meta));
+    // }
+
+    // #[test]
+    // fn test_data() {
+    //     let k = vec![1, 2, 3, 4, 5, 6, 7, 8];
+    //     let v = vec![11, 22, 33, 44, 55, 66, 77, 88];
+
+    //     let data: Data = Data::KeyValue(KVPair::new(Bytes::Slice(&k), Bytes::Slice(&v)));
+
+    //     assert_eq!(data.node_type(), Node::TYPE_DATA);
+    //     assert_eq!(data.key_bytes(), Bytes::Slice(&k));
+    //     assert_eq!(data.key(), &k[..]);
+    //     assert_eq!(data.value(), &v[..]);
+    //     assert_eq!(data.size(), 16);
+
+    //     let meta = BucketMeta {
+    //         root_page: 456,
+    //         next_int: 8_888_888,
+    //     };
+    //     let data: Data = Data::Bucket(BucketData::new(Bytes::Slice(&k), meta));
+
+    //     assert_eq!(data.node_type(), Node::TYPE_BUCKET);
+    //     assert_eq!(data.key_bytes(), Bytes::Slice(&k));
+    //     assert_eq!(data.key(), &k[..]);
+    //     assert_eq!(data.value(), meta.as_ref());
+    //     assert_eq!(data.size(), 8 + std::mem::size_of_val(&meta));
+    // }
 }

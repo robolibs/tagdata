@@ -11,7 +11,13 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
-fs4 = "1.1.0"
+libc = "0.2.149"
 memmap2 = "0.9.11"
+page_size = "0.6.0"
+fs4 = "0.7.0"
+bytes = "1.5.0"
+bumpalo = "3.14.0"
+fnv = "1.0.7"
+sha3 = "0.10.8"
 
 [dev-dependencies]

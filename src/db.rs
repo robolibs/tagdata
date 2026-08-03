@@ -1,1024 +1,503 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs::{File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
-use std::ops::{Bound, RangeBounds};
-use std::path::Path;
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+use std::{
+    fs::{File, OpenOptions as FileOpenOptions},
+    io::Write,
+    path::Path,
+    sync::{Arc, Mutex, RwLock},
+};
 
 use fs4::FileExt;
-use memmap2::{Mmap, MmapOptions};
+use memmap2::Mmap;
+use page_size::get as get_page_size;
 
-use crate::page::{BuiltTree, Meta, Node, Record as PageRecord, build_tree};
-use crate::{BucketName, Cursor, Data, Error, KVPair, Range, Result};
+use crate::{
+    bucket::BucketMeta, errors::Result, freelist::Freelist, meta::Meta, page::Page, tx::Tx,
+};
 
-const PAGE_SIZE: usize = 4096;
-const CREATE_BUCKET: u8 = 1;
-const DELETE_BUCKET: u8 = 2;
-const PUT: u8 = 3;
-const DELETE: u8 = 4;
-type Operation = (u8, Vec<u8>, Vec<u8>, Vec<u8>);
+const MAGIC_VALUE: u32 = 0x00AB_CDEF;
+const VERSION: u32 = 1;
 
-#[derive(Clone, Copy, Debug)]
-struct Slice {
-    offset: usize,
-    len: usize,
+// Minimum number of bytes to allocate when growing the databse
+pub(crate) const MIN_ALLOC_SIZE: u64 = 8 * 1024 * 1024;
+
+// Number of pages to allocate when creating the database
+const DEFAULT_NUM_PAGES: usize = 32;
+
+/// Options to configure how a [`DB`] is opened.
+///
+/// This struct acts as a builder for a [`DB`] and allows you to specify
+/// the initial pagesize and number of pages you want to allocate for a new database file.
+///
+/// # Examples
+///
+/// ```no_run
+/// use inspace::{DB, OpenOptions};
+/// # use inspace::Error;
+///
+/// # fn main() -> Result<(), Error> {
+/// let db = OpenOptions::new()
+///     .pagesize(4096)
+///     .num_pages(32)
+///     .open("my.db")?;
+///
+/// // do whatever you want with the DB
+/// # Ok(())
+/// # }
+/// ```
+pub struct OpenOptions {
+    pagesize: u64,
+    num_pages: usize,
+    flags: DBFlags,
 }
 
-impl Slice {
-    fn get(self, mmap: &Mmap) -> &[u8] {
-        &mmap[self.offset..self.offset + self.len]
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Entry {
-    bucket: Slice,
-    key: Slice,
-    value: Slice,
-}
-
-struct State {
-    mmap: Mmap,
-    meta: Meta,
-    buckets: HashMap<u64, Vec<Slice>>,
-    entries: HashMap<u64, Vec<Entry>>,
-    next_ints: HashMap<Vec<u8>, u64>,
-}
-
-/// A single-file, memory-mapped database.
-#[derive(Clone)]
-pub struct Database {
-    inner: Arc<Inner>,
-}
-
-struct Inner {
-    file: File,
-    state: RwLock<State>,
-}
-
-impl Database {
-    /// Opens an existing database, or creates a new one at `path`.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)?;
-        FileExt::lock(&file)?;
-        if file.metadata()?.len() == 0 {
-            initialize(&file)?;
-        }
-        let mmap = map(&file)?;
-        let state = load_state(mmap)?;
-        Ok(Self {
-            inner: Arc::new(Inner {
-                file,
-                state: RwLock::new(state),
-            }),
-        })
+impl OpenOptions {
+    /// Returns a new OpenOptions, with the default values.
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Runs a read-only transaction against a stable memory-map snapshot.
-    pub fn view<T>(&self, read: impl FnOnce(&ReadTransaction<'_>) -> Result<T>) -> Result<T> {
-        let state = self.read_state();
-        read(&ReadTransaction { state })
-    }
-
-    /// Runs and durably commits one write transaction.
+    /// Sets the pagesize for the database
     ///
-    /// Dropping the callback with an error writes nothing. An empty successful
-    /// transaction also performs no I/O.
-    pub fn update<T>(
-        &self,
-        write: impl FnOnce(&mut WriteTransaction<'_>) -> Result<T>,
-    ) -> Result<T> {
-        let mut state = self.write_state();
-        let mut tx = WriteTransaction {
-            state: &state,
-            operations: Vec::new(),
-            bucket_changes: HashMap::new(),
-        };
-        let result = write(&mut tx)?;
-        if tx.operations.is_empty() {
-            return Ok(result);
+    /// By default, your OS's pagesize is used as the database's pagesize, but if the file is
+    /// moved across systems with different page sizes, it is necessary to set the correct value.
+    /// Trying to open an existing database with the incorrect page size will result in a panic.
+    ///
+    /// # Panics
+    /// Will panic if you try to set the pagesize < 1024 bytes.
+    pub fn pagesize(mut self, pagesize: u64) -> Self {
+        if pagesize < 1024 {
+            panic!("Pagesize must be 1024 bytes minimum");
         }
-
-        validate_operations(&state, &tx.operations)?;
-        let mut owned = OwnedState::from_state(&state);
-        owned.apply(&tx.operations)?;
-        let txid = state.meta.txid.checked_add(1).ok_or(Error::TooLarge)?;
-        let records = owned.records()?;
-        let tree = build_tree(
-            &records,
-            state.meta.page_size as usize,
-            state.meta.high_water,
-        )?;
-        let meta = Meta {
-            page_size: state.meta.page_size,
-            txid,
-            root: tree.root,
-            high_water: tree.high_water,
-            freelist: 0,
-        };
-        let empty = MmapOptions::new().len(1).map_anon()?.make_read_only()?;
-        state.mmap = empty;
-        write_tree(&self.inner.file, &tree, meta)?;
-        *state = load_state(map(&self.inner.file)?)?;
-        Ok(result)
+        self.pagesize = pagesize;
+        self
     }
 
-    /// Returns the last committed transaction identifier.
-    pub fn transaction_id(&self) -> u64 {
-        self.read_state().meta.txid
-    }
-
-    pub fn check(&self) -> Result<()> {
-        let state = self.read_state();
-        let checked = load_state(map(&self.inner.file)?)?;
-        if checked.meta != state.meta
-            || checked.buckets.values().map(Vec::len).sum::<usize>()
-                != state.buckets.values().map(Vec::len).sum::<usize>()
-            || checked.entries.values().map(Vec::len).sum::<usize>()
-                != state.entries.values().map(Vec::len).sum::<usize>()
-        {
-            return Err(Error::Corrupt("state does not match committed data"));
+    /// Sets the number of pages to allocate for a new database file.
+    ///
+    /// The default `num_pages` is set to 32, so if your pagesize is 4096 bytes (4kb), then 131,072 bytes (128kb) will be allocated for the initial file.
+    /// Setting `num_pages` when opening an existing database has no effect.
+    ///
+    /// # Panics
+    /// Since a minimum of four pages are required for the database, this function will panic if you provide a value < 4.
+    pub fn num_pages(mut self, num_pages: usize) -> Self {
+        if num_pages < 4 {
+            panic!("Must have a minimum of 4 pages");
         }
-        Ok(())
+        self.num_pages = num_pages;
+        self
     }
 
-    fn read_state(&self) -> RwLockReadGuard<'_, State> {
-        self.inner
-            .state
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    /// Enables or disables "Strict Mode", where each transaction will check the database for errors before finalizing a write.
+    ///
+    /// The default is `false`, but you may enable this if you want an extra degree of safety for your data at the cost of
+    /// slower writes.
+    pub fn strict_mode(mut self, strict_mode: bool) -> Self {
+        self.flags.strict_mode = strict_mode;
+        self
     }
 
-    fn write_state(&self) -> RwLockWriteGuard<'_, State> {
-        self.inner
-            .state
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-}
-
-/// A stable, zero-copy read transaction.
-pub struct ReadTransaction<'db> {
-    state: RwLockReadGuard<'db, State>,
-}
-
-impl ReadTransaction<'_> {
-    /// Opens a bucket by name.
-    pub fn bucket<'tx>(&'tx self, name: &[u8]) -> Result<Bucket<'tx>> {
-        let path = root_path(name)?;
-        find_bucket(&self.state, &path).ok_or(Error::BucketNotFound)?;
-        Ok(Bucket {
-            state: &self.state,
-            path,
-        })
+    /// Enables or disables the [MAP_POPULATE flag](MAP_POPULATE) for the `mmap` call, which will cause Linux to eagerly load pages into memory.
+    ///
+    /// The default is `false`, but you may enable this if your database file will stay smaller than your available memory.
+    /// It is not recommended to enable this unless you know what you are doing.
+    ///
+    /// This setting only works on Linux, and is a no-op on other platforms.
+    pub fn mmap_populate(mut self, mmap_populate: bool) -> Self {
+        self.flags.mmap_populate = mmap_populate;
+        self
     }
 
-    pub fn buckets(&self) -> impl Iterator<Item = (BucketName<'_>, Bucket<'_>)> {
-        direct_buckets(&self.state, &[]).into_iter()
-    }
-}
-
-/// A read-only view of a bucket.
-pub struct Bucket<'tx> {
-    state: &'tx State,
-    path: Vec<u8>,
-}
-
-impl<'tx> Bucket<'tx> {
-    /// Gets an entry without copying it out of the memory map.
-    pub fn get(&self, key: impl AsRef<[u8]>) -> Option<Data<'tx>> {
-        let key = key.as_ref();
-        let child = child_path(&self.path, key).ok()?;
-        if let Some(stored) = find_bucket(self.state, &child) {
-            let path = stored.get(&self.state.mmap);
-            return Some(Data::Bucket(BucketName::new(path_name(path)?)));
-        }
-        self.get_kv(key).map(Data::KeyValue)
+    /// Enables or disables the O_DIRECT flag when opening the database file.
+    /// This gives a hint to Linux to bypass any operarating system caches when writing to this file.
+    ///
+    /// The default is `false`, but you may enable this if your database is much larger than your available memory to avoid throttling the page cache.
+    /// It is not recommended to enable this unless you know what you are doing.
+    ///
+    /// This setting only works on Linux, and is a no-op on other platforms.
+    pub fn direct_writes(mut self, direct_writes: bool) -> Self {
+        self.flags.direct_writes = direct_writes;
+        self
     }
 
-    pub fn get_kv(&self, key: impl AsRef<[u8]>) -> Option<KVPair<'tx>> {
-        find_entry(self.state, &self.path, key.as_ref()).map(|entry| {
-            KVPair::new(
-                entry.key.get(&self.state.mmap),
-                entry.value.get(&self.state.mmap),
-            )
-        })
-    }
-
-    /// Returns true when this bucket contains `key`.
-    pub fn contains_key(&self, key: &[u8]) -> bool {
-        self.get(key).is_some()
-    }
-
-    pub fn cursor(&self) -> Cursor<'tx> {
-        let mut items = Vec::new();
-        for (name, _) in direct_buckets(self.state, &self.path) {
-            items.push(Data::Bucket(name));
-        }
-        for entries in self.state.entries.values() {
-            for entry in entries {
-                if entry.bucket.get(&self.state.mmap) == self.path {
-                    items.push(Data::KeyValue(KVPair::new(
-                        entry.key.get(&self.state.mmap),
-                        entry.value.get(&self.state.mmap),
-                    )));
-                }
-            }
-        }
-        Cursor::new(items)
-    }
-
-    pub fn get_bucket(&self, name: impl AsRef<[u8]>) -> Result<Bucket<'tx>> {
-        let path = child_path(&self.path, name.as_ref())?;
-        find_bucket(self.state, &path).ok_or(Error::BucketNotFound)?;
-        Ok(Bucket {
-            state: self.state,
-            path,
-        })
-    }
-
-    pub fn buckets(&self) -> impl Iterator<Item = (BucketName<'tx>, Bucket<'tx>)> {
-        direct_buckets(self.state, &self.path).into_iter()
-    }
-
-    pub fn kv_pairs(&self) -> impl Iterator<Item = KVPair<'tx>> {
-        self.cursor().filter_map(|entry| match entry {
-            Data::KeyValue(pair) => Some(pair),
-            Data::Bucket(_) => None,
-        })
-    }
-
-    pub fn range<'a, R>(&self, bounds: R) -> Range<'tx>
-    where
-        R: RangeBounds<&'a [u8]>,
-    {
-        let items = self
-            .cursor()
-            .filter(|entry| {
-                let key = entry.key();
-                let after_start = match bounds.start_bound() {
-                    Bound::Included(start) => key >= *start,
-                    Bound::Excluded(start) => key > *start,
-                    Bound::Unbounded => true,
-                };
-                let before_end = match bounds.end_bound() {
-                    Bound::Included(end) => key <= *end,
-                    Bound::Excluded(end) => key < *end,
-                    Bound::Unbounded => true,
-                };
-                after_start && before_end
-            })
-            .collect();
-        Range::new(items)
-    }
-
-    pub fn next_int(&self) -> u64 {
-        self.state.next_ints.get(&self.path).copied().unwrap_or(0)
-    }
-}
-
-impl<'tx> IntoIterator for Bucket<'tx> {
-    type Item = Data<'tx>;
-    type IntoIter = Cursor<'tx>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.cursor()
-    }
-}
-
-/// A buffered write transaction.
-pub struct WriteTransaction<'db> {
-    state: &'db State,
-    operations: Vec<Operation>,
-    bucket_changes: HashMap<Vec<u8>, bool>,
-}
-
-impl<'db> WriteTransaction<'db> {
-    /// Creates a bucket.
-    pub fn create_bucket(&mut self, name: impl AsRef<[u8]>) -> Result<WriteBucket<'_, 'db>> {
-        let path = root_path(name.as_ref())?;
-        if self.bucket_will_exist(&path) {
-            return Err(Error::BucketExists);
-        }
-        self.operations
-            .push((CREATE_BUCKET, path.clone(), Vec::new(), Vec::new()));
-        self.bucket_changes.insert(path.clone(), true);
-        Ok(WriteBucket { tx: self, path })
-    }
-
-    /// Deletes a bucket and all of its keys.
-    pub fn delete_bucket(&mut self, name: impl AsRef<[u8]>) -> Result<()> {
-        let path = root_path(name.as_ref())?;
-        if !self.bucket_will_exist(&path) {
-            return Err(Error::BucketNotFound);
-        }
-        self.operations
-            .push((DELETE_BUCKET, path.clone(), Vec::new(), Vec::new()));
-        self.bucket_changes.insert(path, false);
-        Ok(())
-    }
-
-    pub fn bucket(&mut self, name: impl AsRef<[u8]>) -> Result<WriteBucket<'_, 'db>> {
-        let path = root_path(name.as_ref())?;
-        if !self.bucket_will_exist(&path) {
-            return Err(Error::BucketNotFound);
-        }
-        Ok(WriteBucket { tx: self, path })
-    }
-
-    pub fn get_or_create_bucket(&mut self, name: impl AsRef<[u8]>) -> Result<WriteBucket<'_, 'db>> {
-        let path = root_path(name.as_ref())?;
-        if !self.bucket_will_exist(&path) {
-            self.operations
-                .push((CREATE_BUCKET, path.clone(), Vec::new(), Vec::new()));
-            self.bucket_changes.insert(path.clone(), true);
-        }
-        Ok(WriteBucket { tx: self, path })
-    }
-
-    /// Inserts or replaces a key/value pair.
-    pub fn put(
-        &mut self,
-        bucket: impl AsRef<[u8]>,
-        key: impl AsRef<[u8]>,
-        value: impl AsRef<[u8]>,
-    ) -> Result<()> {
-        let bucket = root_path(bucket.as_ref())?;
-        if !self.bucket_will_exist(&bucket) {
-            return Err(Error::BucketNotFound);
-        }
-        let key = key.as_ref();
-        if self.bucket_will_exist(&child_path(&bucket, key)?) {
-            return Err(Error::IncompatibleValue);
-        }
-        self.operations
-            .push((PUT, bucket, key.to_vec(), value.as_ref().to_vec()));
-        Ok(())
-    }
-
-    /// Deletes a key.
-    pub fn delete(&mut self, bucket: impl AsRef<[u8]>, key: impl AsRef<[u8]>) -> Result<()> {
-        let bucket = root_path(bucket.as_ref())?;
-        if !self.bucket_will_exist(&bucket) {
-            return Err(Error::BucketNotFound);
-        }
-        let key = key.as_ref();
-        if self.bucket_will_exist(&child_path(&bucket, key)?) {
-            return Err(Error::IncompatibleValue);
-        }
-        if !self.key_will_exist(&bucket, key) {
-            return Err(Error::KeyValueMissing);
-        }
-        self.operations
-            .push((DELETE, bucket, key.to_vec(), Vec::new()));
-        Ok(())
-    }
-
-    fn bucket_will_exist(&self, name: &[u8]) -> bool {
-        if let Some(exists) = self.bucket_changes.get(name) {
-            return *exists;
-        }
-        if self
-            .bucket_changes
-            .iter()
-            .any(|(path, exists)| !exists && name.starts_with(path))
-        {
-            return false;
-        }
-        bucket_exists(self.state, name)
-    }
-
-    fn key_will_exist(&self, bucket: &[u8], key: &[u8]) -> bool {
-        for (kind, operation_bucket, operation_key, _) in self.operations.iter().rev() {
-            if *kind == DELETE_BUCKET && bucket.starts_with(operation_bucket) {
-                return false;
-            }
-            if operation_bucket == bucket && operation_key == key {
-                return *kind == PUT;
-            }
-        }
-        find_entry(self.state, bucket, key).is_some()
-    }
-
-    fn staged_next_int(&self, bucket: &[u8]) -> u64 {
-        let reset = self
-            .operations
-            .iter()
-            .rposition(|(kind, path, _, _)| *kind == CREATE_BUCKET && path == bucket);
-        let mut next = if reset.is_some() {
-            0
+    /// Opens the database with the current options.
+    ///
+    /// If the file does not exist, it will initialize an empty database with a size of (`num_pages * pagesize`) bytes.
+    /// If it does exist, the file is opened with both read and write permissions, and we attempt to create an
+    /// [exclusive lock](https://en.wikipedia.org/wiki/File_locking) on the file. Getting the file lock will block until the lock
+    /// is released to prevent you from having two processes modifying the file at the same time. This lock is not foolproof though,
+    /// so it is up to the user to make sure only one process has access to the database at a time (unless it is read-only).
+    ///
+    /// # Errors
+    ///
+    /// Will return an error if there are issues creating a new file, opening an existing file, obtaining the file lock, or creating the memory map.
+    ///
+    /// # Panics
+    ///
+    /// Will panic if the pagesize the database is opened with is not the same as the pagesize it was created with.
+    pub fn open<P: AsRef<Path>>(self, path: P) -> Result<DB> {
+        let path: &Path = path.as_ref();
+        let file = if !path.exists() {
+            init_file(
+                path,
+                self.pagesize,
+                self.num_pages,
+                self.flags.direct_writes,
+            )?
         } else {
-            self.state.next_ints.get(bucket).copied().unwrap_or(0)
+            open_file(path, false, self.flags.direct_writes)?
         };
-        let mut keys = HashMap::<Vec<u8>, bool>::new();
-        let start = reset.map_or(0, |index| index + 1);
-        for (kind, path, key, _) in &self.operations[start..] {
-            if *kind == CREATE_BUCKET && parent_path(path) == Some(bucket) {
-                next = next.saturating_add(1);
-            } else if path == bucket && matches!(*kind, PUT | DELETE) {
-                let exists = keys
-                    .get(key.as_slice())
-                    .copied()
-                    .unwrap_or_else(|| find_entry(self.state, bucket, key).is_some());
-                if *kind == PUT && !exists {
-                    next = next.saturating_add(1);
-                }
-                keys.insert(key.clone(), *kind == PUT);
-            }
-        }
-        next
-    }
-}
 
-pub struct WriteBucket<'tx, 'db> {
-    tx: &'tx mut WriteTransaction<'db>,
-    path: Vec<u8>,
-}
-
-impl<'tx, 'db> WriteBucket<'tx, 'db> {
-    pub fn next_int(&self) -> u64 {
-        self.tx.staged_next_int(&self.path)
-    }
-
-    pub fn put(&mut self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<()> {
-        let key = key.as_ref();
-        if self.tx.bucket_will_exist(&child_path(&self.path, key)?) {
-            return Err(Error::IncompatibleValue);
-        }
-        self.tx.operations.push((
-            PUT,
-            self.path.clone(),
-            key.to_vec(),
-            value.as_ref().to_vec(),
-        ));
-        Ok(())
-    }
-
-    pub fn delete(&mut self, key: impl AsRef<[u8]>) -> Result<()> {
-        let key = key.as_ref();
-        if self.tx.bucket_will_exist(&child_path(&self.path, key)?) {
-            return Err(Error::IncompatibleValue);
-        }
-        if !self.tx.key_will_exist(&self.path, key) {
-            return Err(Error::KeyValueMissing);
-        }
-        self.tx
-            .operations
-            .push((DELETE, self.path.clone(), key.to_vec(), Vec::new()));
-        Ok(())
-    }
-
-    pub fn create_bucket(&mut self, name: impl AsRef<[u8]>) -> Result<WriteBucket<'_, 'db>> {
-        let path = child_path(&self.path, name.as_ref())?;
-        if self.tx.bucket_will_exist(&path) {
-            return Err(Error::BucketExists);
-        }
-        if self.tx.key_will_exist(&self.path, name.as_ref()) {
-            return Err(Error::IncompatibleValue);
-        }
-        self.tx
-            .operations
-            .push((CREATE_BUCKET, path.clone(), Vec::new(), Vec::new()));
-        self.tx.bucket_changes.insert(path.clone(), true);
-        Ok(WriteBucket { tx: self.tx, path })
-    }
-
-    pub fn get_bucket(&mut self, name: impl AsRef<[u8]>) -> Result<WriteBucket<'_, 'db>> {
-        let path = child_path(&self.path, name.as_ref())?;
-        if !self.tx.bucket_will_exist(&path) {
-            if self.tx.key_will_exist(&self.path, name.as_ref()) {
-                return Err(Error::IncompatibleValue);
-            }
-            return Err(Error::BucketNotFound);
-        }
-        Ok(WriteBucket { tx: self.tx, path })
-    }
-
-    pub fn get_or_create_bucket(&mut self, name: impl AsRef<[u8]>) -> Result<WriteBucket<'_, 'db>> {
-        let path = child_path(&self.path, name.as_ref())?;
-        if !self.tx.bucket_will_exist(&path) {
-            if self.tx.key_will_exist(&self.path, name.as_ref()) {
-                return Err(Error::IncompatibleValue);
-            }
-            self.tx
-                .operations
-                .push((CREATE_BUCKET, path.clone(), Vec::new(), Vec::new()));
-            self.tx.bucket_changes.insert(path.clone(), true);
-        }
-        Ok(WriteBucket { tx: self.tx, path })
-    }
-
-    pub fn delete_bucket(&mut self, name: impl AsRef<[u8]>) -> Result<()> {
-        let path = child_path(&self.path, name.as_ref())?;
-        if !self.tx.bucket_will_exist(&path) {
-            return Err(Error::BucketNotFound);
-        }
-        self.tx
-            .operations
-            .push((DELETE_BUCKET, path.clone(), Vec::new(), Vec::new()));
-        self.tx.bucket_changes.insert(path, false);
-        Ok(())
-    }
-}
-
-fn map(file: &File) -> Result<Mmap> {
-    // The exclusive state lock removes the old map before committed pages change.
-    Ok(unsafe { MmapOptions::new().map(file)? })
-}
-
-fn initialize(file: &File) -> Result<()> {
-    let tree = build_tree(&[], PAGE_SIZE, 2)?;
-    let meta = Meta {
-        page_size: PAGE_SIZE as u32,
-        txid: 0,
-        root: tree.root,
-        high_water: tree.high_water,
-        freelist: 0,
-    };
-    file.set_len(meta.high_water * PAGE_SIZE as u64)?;
-    for (page, bytes) in &tree.pages {
-        write_at(file, page * PAGE_SIZE as u64, bytes)?;
-    }
-    let encoded = meta.encode()?;
-    write_at(file, 0, &encoded)?;
-    write_at(file, PAGE_SIZE as u64, &encoded)?;
-    file.sync_data()?;
-    Ok(())
-}
-
-fn write_tree(file: &File, tree: &BuiltTree, meta: Meta) -> Result<()> {
-    file.set_len(meta.high_water * u64::from(meta.page_size))?;
-    for (page, bytes) in &tree.pages {
-        write_at(file, page * u64::from(meta.page_size), bytes)?;
-    }
-    file.sync_data()?;
-    let slot = meta.txid & 1;
-    write_at(file, slot * u64::from(meta.page_size), &meta.encode()?)?;
-    file.sync_data()?;
-    Ok(())
-}
-
-fn write_at(file: &File, offset: u64, bytes: &[u8]) -> Result<()> {
-    let mut file = file;
-    file.seek(SeekFrom::Start(offset))?;
-    file.write_all(bytes)?;
-    Ok(())
-}
-
-fn load_state(mmap: Mmap) -> Result<State> {
-    let meta = select_meta(&mmap)?;
-    let required = meta
-        .high_water
-        .checked_mul(u64::from(meta.page_size))
-        .ok_or(Error::Corrupt("file length overflow"))?;
-    if required > mmap.len() as u64 {
-        return Err(Error::Corrupt("committed pages exceed file"));
-    }
-    let mut leaves = Vec::new();
-    let mut visited = BTreeSet::new();
-    walk_tree(&mmap, meta, meta.root, &mut visited, &mut leaves)?;
-    let mut loaded = Vec::with_capacity(leaves.len());
-    let mut previous: Option<Vec<u8>> = None;
-    for (key_slice, value_slice) in leaves {
-        let key = key_slice.get(&mmap);
-        let value = value_slice.get(&mmap);
-        if previous.as_deref().is_some_and(|old| old >= key) {
-            return Err(Error::Corrupt("tree keys are not ordered"));
-        }
-        previous = Some(key.to_vec());
-        match key.first() {
-            Some(0) if value.len() == 8 => {
-                let path = Slice {
-                    offset: key_slice.offset + 1,
-                    len: key_slice.len - 1,
-                };
-                let next = u64::from_le_bytes(value.try_into().expect("length checked"));
-                loaded.push(LoadedRecord::Bucket(path, next));
-            }
-            Some(1) if key.len() >= 5 => {
-                let path_len =
-                    u32::from_le_bytes(key[1..5].try_into().expect("length checked")) as usize;
-                if key.len() < 5 + path_len {
-                    return Err(Error::Corrupt("invalid key path length"));
-                }
-                loaded.push(LoadedRecord::Entry(Entry {
-                    bucket: Slice {
-                        offset: key_slice.offset + 5,
-                        len: path_len,
-                    },
-                    key: Slice {
-                        offset: key_slice.offset + 5 + path_len,
-                        len: key.len() - 5 - path_len,
-                    },
-                    value: value_slice,
-                }));
-            }
-            _ => return Err(Error::Corrupt("invalid tree record")),
-        }
-    }
-    let mut state = State {
-        mmap,
-        meta,
-        buckets: HashMap::new(),
-        entries: HashMap::new(),
-        next_ints: HashMap::new(),
-    };
-    for record in loaded {
-        match record {
-            LoadedRecord::Bucket(path, next) => {
-                let bytes = path.get(&state.mmap);
-                if parent_path(bytes).is_none() || bucket_exists(&state, bytes) {
-                    return Err(Error::Corrupt("invalid bucket record"));
-                }
-                state.next_ints.insert(bytes.to_vec(), next);
-                insert_bucket(&mut state, path);
-            }
-            LoadedRecord::Entry(entry) => {
-                let bucket = entry.bucket.get(&state.mmap);
-                let key = entry.key.get(&state.mmap);
-                if !bucket_exists(&state, bucket) || find_entry(&state, bucket, key).is_some() {
-                    return Err(Error::Corrupt("invalid key record"));
-                }
-                insert_entry(&mut state, entry);
-            }
-        }
-    }
-    validate_loaded_state(&state)?;
-    Ok(state)
-}
-
-fn select_meta(mmap: &Mmap) -> Result<Meta> {
-    if mmap.len() < PAGE_SIZE * 2 {
-        return Err(Error::Corrupt("meta pages are truncated"));
-    }
-    let first = Meta::decode(&mmap[..PAGE_SIZE]).ok();
-    let second = Meta::decode(&mmap[PAGE_SIZE..PAGE_SIZE * 2]).ok();
-    let meta = match (first, second) {
-        (Some(left), Some(right)) => {
-            if left.txid >= right.txid {
-                left
-            } else {
-                right
-            }
-        }
-        (Some(meta), None) | (None, Some(meta)) => meta,
-        (None, None) => return Err(Error::Corrupt("both meta pages are invalid")),
-    };
-    if meta.page_size as usize != PAGE_SIZE {
-        return Err(Error::Corrupt("unsupported page size"));
-    }
-    Ok(meta)
-}
-
-fn walk_tree(
-    mmap: &Mmap,
-    meta: Meta,
-    page: u64,
-    visited: &mut BTreeSet<u64>,
-    leaves: &mut Vec<(Slice, Slice)>,
-) -> Result<()> {
-    if page < 2 || page >= meta.high_water || !visited.insert(page) {
-        return Err(Error::Corrupt("invalid or repeated tree page"));
-    }
-    let offset = usize::try_from(page)
-        .ok()
-        .and_then(|page| page.checked_mul(meta.page_size as usize))
-        .ok_or(Error::Corrupt("page offset overflow"))?;
-    let node = Node::decode(&mmap[offset..], meta.page_size as usize)?;
-    if node.page() != page || page + node.span() as u64 > meta.high_water {
-        return Err(Error::Corrupt("node page identity mismatch"));
-    }
-    for covered in page..page + node.span() as u64 {
-        if covered != page && !visited.insert(covered) {
-            return Err(Error::Corrupt("overlapping tree pages"));
-        }
-    }
-    if node.is_leaf() {
-        for (key, value) in node.leaf_records()? {
-            leaves.push((slice_in_map(mmap, key)?, slice_in_map(mmap, value)?));
-        }
-    } else {
-        let branches = node.branches()?;
-        if branches.is_empty() {
-            return Err(Error::Corrupt("empty branch node"));
-        }
-        for (_, child) in branches {
-            walk_tree(mmap, meta, child, visited, leaves)?;
-        }
-    }
-    Ok(())
-}
-
-enum LoadedRecord {
-    Bucket(Slice, u64),
-    Entry(Entry),
-}
-
-fn slice_in_map(mmap: &Mmap, bytes: &[u8]) -> Result<Slice> {
-    let base = mmap.as_ptr() as usize;
-    let start = bytes.as_ptr() as usize;
-    let offset = start
-        .checked_sub(base)
-        .ok_or(Error::Corrupt("slice is outside mapping"))?;
-    if offset + bytes.len() > mmap.len() {
-        return Err(Error::Corrupt("slice is outside mapping"));
-    }
-    Ok(Slice {
-        offset,
-        len: bytes.len(),
-    })
-}
-
-fn validate_loaded_state(state: &State) -> Result<()> {
-    for paths in state.buckets.values() {
-        for path in paths {
-            let path = path.get(&state.mmap);
-            let parent = parent_path(path).ok_or(Error::Corrupt("invalid bucket path"))?;
-            if !parent.is_empty() && !bucket_exists(state, parent) {
-                return Err(Error::Corrupt("bucket parent is missing"));
-            }
-        }
-    }
-    for entries in state.entries.values() {
-        for entry in entries {
-            let bucket = entry.bucket.get(&state.mmap);
-            let key = entry.key.get(&state.mmap);
-            if bucket_exists(state, &child_path(bucket, key)?) {
-                return Err(Error::Corrupt("key conflicts with bucket"));
-            }
-        }
-    }
-    Ok(())
-}
-
-struct OwnedState {
-    buckets: BTreeMap<Vec<u8>, u64>,
-    entries: BTreeMap<(Vec<u8>, Vec<u8>), Vec<u8>>,
-}
-
-impl OwnedState {
-    fn from_state(state: &State) -> Self {
-        let mut buckets = BTreeMap::new();
-        for paths in state.buckets.values() {
-            for path in paths {
-                let path = path.get(&state.mmap).to_vec();
-                let next = state.next_ints.get(&path).copied().unwrap_or(0);
-                buckets.insert(path, next);
-            }
-        }
-        let mut entries = BTreeMap::new();
-        for list in state.entries.values() {
-            for entry in list {
-                entries.insert(
-                    (
-                        entry.bucket.get(&state.mmap).to_vec(),
-                        entry.key.get(&state.mmap).to_vec(),
-                    ),
-                    entry.value.get(&state.mmap).to_vec(),
-                );
-            }
-        }
-        Self { buckets, entries }
-    }
-
-    fn apply(&mut self, operations: &[Operation]) -> Result<()> {
-        for (kind, bucket, key, value) in operations {
-            match *kind {
-                CREATE_BUCKET => {
-                    if self.buckets.contains_key(bucket) {
-                        return Err(Error::BucketExists);
-                    }
-                    if let Some(parent) = parent_path(bucket)
-                        && !parent.is_empty()
-                    {
-                        let next = self.buckets.get_mut(parent).ok_or(Error::BucketNotFound)?;
-                        *next = next.saturating_add(1);
-                    }
-                    self.buckets.insert(bucket.clone(), 0);
-                }
-                DELETE_BUCKET => {
-                    if self.buckets.remove(bucket).is_none() {
-                        return Err(Error::BucketNotFound);
-                    }
-                    self.buckets.retain(|path, _| !path.starts_with(bucket));
-                    self.entries
-                        .retain(|(path, _), _| !path.starts_with(bucket));
-                }
-                PUT => {
-                    if !self.buckets.contains_key(bucket) {
-                        return Err(Error::BucketNotFound);
-                    }
-                    if self
-                        .entries
-                        .insert((bucket.clone(), key.clone()), value.clone())
-                        .is_none()
-                    {
-                        *self.buckets.get_mut(bucket).expect("checked") += 1;
-                    }
-                }
-                DELETE => {
-                    if self
-                        .entries
-                        .remove(&(bucket.clone(), key.clone()))
-                        .is_none()
-                    {
-                        return Err(Error::KeyValueMissing);
-                    }
-                }
-                _ => return Err(Error::Corrupt("unknown staged operation")),
-            }
-        }
-        Ok(())
-    }
-
-    fn records(&self) -> Result<Vec<PageRecord>> {
-        let mut records = Vec::with_capacity(self.buckets.len() + self.entries.len());
-        for (path, next) in &self.buckets {
-            let mut key = Vec::with_capacity(1 + path.len());
-            key.push(0);
-            key.extend_from_slice(path);
-            records.push(PageRecord {
-                key,
-                value: next.to_le_bytes().to_vec(),
-            });
-        }
-        for ((path, entry_key), value) in &self.entries {
-            let path_len = u32::try_from(path.len()).map_err(|_| Error::TooLarge)?;
-            let mut key = Vec::with_capacity(5 + path.len() + entry_key.len());
-            key.push(1);
-            key.extend_from_slice(&path_len.to_le_bytes());
-            key.extend_from_slice(path);
-            key.extend_from_slice(entry_key);
-            records.push(PageRecord {
-                key,
-                value: value.clone(),
-            });
-        }
-        Ok(records)
-    }
-}
-
-fn validate_operations(state: &State, operations: &[Operation]) -> Result<()> {
-    let mut existence = HashMap::<Vec<u8>, bool>::new();
-    for (kind, bucket, _, _) in operations {
-        let exists = match existence.get(bucket.as_slice()) {
-            Some(exists) => *exists,
-            None => {
-                let exists = bucket_exists(state, bucket);
-                existence.insert(bucket.clone(), exists);
-                exists
-            }
-        };
-        match *kind {
-            CREATE_BUCKET if exists => return Err(Error::BucketExists),
-            CREATE_BUCKET => {
-                existence.insert(bucket.clone(), true);
-            }
-            DELETE_BUCKET if !exists => return Err(Error::BucketNotFound),
-            DELETE_BUCKET => {
-                existence.insert(bucket.clone(), false);
-            }
-            PUT | DELETE if !exists => return Err(Error::BucketNotFound),
-            PUT | DELETE => {}
-            _ => return Err(Error::Corrupt("unknown staged operation")),
-        }
-    }
-    Ok(())
-}
-
-fn insert_bucket(state: &mut State, bucket: Slice) {
-    let hash = hash(bucket.get(&state.mmap));
-    let mmap = &state.mmap;
-    let list = state.buckets.entry(hash).or_default();
-    list.retain(|existing| existing.get(mmap) != bucket.get(mmap));
-    list.push(bucket);
-}
-
-fn insert_entry(state: &mut State, entry: Entry) {
-    let bucket = entry.bucket.get(&state.mmap);
-    let key = entry.key.get(&state.mmap);
-    let combined_hash = pair_hash(bucket, key);
-    let mmap = &state.mmap;
-    let list = state.entries.entry(combined_hash).or_default();
-    list.retain(|existing| existing.bucket.get(mmap) != bucket || existing.key.get(mmap) != key);
-    list.push(entry);
-}
-
-fn root_path(name: &[u8]) -> Result<Vec<u8>> {
-    child_path(&[], name)
-}
-
-fn child_path(parent: &[u8], name: &[u8]) -> Result<Vec<u8>> {
-    let len = u32::try_from(name.len()).map_err(|_| Error::TooLarge)?;
-    let mut path = Vec::with_capacity(parent.len() + 4 + name.len());
-    path.extend_from_slice(parent);
-    path.extend_from_slice(&len.to_le_bytes());
-    path.extend_from_slice(name);
-    Ok(path)
-}
-
-fn path_name(path: &[u8]) -> Option<&[u8]> {
-    let mut cursor = 0;
-    let mut name = None;
-    while cursor < path.len() {
-        let end = cursor.checked_add(4)?;
-        let len = u32::from_le_bytes(path.get(cursor..end)?.try_into().ok()?) as usize;
-        cursor = end;
-        let end = cursor.checked_add(len)?;
-        name = Some(path.get(cursor..end)?);
-        cursor = end;
-    }
-    name
-}
-
-fn parent_path(path: &[u8]) -> Option<&[u8]> {
-    let mut cursor = 0;
-    let mut previous = 0;
-    while cursor < path.len() {
-        previous = cursor;
-        let end = cursor.checked_add(4)?;
-        let len = u32::from_le_bytes(path.get(cursor..end)?.try_into().ok()?) as usize;
-        cursor = end.checked_add(len)?;
-        if cursor > path.len() {
-            return None;
-        }
-    }
-    (cursor == path.len()).then_some(&path[..previous])
-}
-
-fn direct_child_name<'a>(path: &'a [u8], parent: &[u8]) -> Option<&'a [u8]> {
-    let suffix = path.strip_prefix(parent)?;
-    if suffix.len() < 4 {
-        return None;
-    }
-    let len = u32::from_le_bytes(suffix[..4].try_into().ok()?) as usize;
-    if suffix.len() != 4 + len {
-        return None;
-    }
-    Some(&suffix[4..])
-}
-
-fn direct_buckets<'a>(state: &'a State, parent: &[u8]) -> Vec<(BucketName<'a>, Bucket<'a>)> {
-    let mut buckets = Vec::new();
-    for paths in state.buckets.values() {
-        for stored in paths {
-            let path = stored.get(&state.mmap);
-            if let Some(name) = direct_child_name(path, parent) {
-                buckets.push((
-                    BucketName::new(name),
-                    Bucket {
-                        state,
-                        path: path.to_vec(),
-                    },
-                ));
-            }
-        }
-    }
-    buckets.sort_unstable_by(|left, right| left.0.name().cmp(right.0.name()));
-    buckets
-}
-
-fn bucket_exists(state: &State, bucket: &[u8]) -> bool {
-    find_bucket(state, bucket).is_some()
-}
-
-fn find_bucket(state: &State, bucket: &[u8]) -> Option<Slice> {
-    state.buckets.get(&hash(bucket)).and_then(|list| {
-        list.iter()
-            .copied()
-            .find(|stored| stored.get(&state.mmap) == bucket)
-    })
-}
-
-fn find_entry<'a>(state: &'a State, bucket: &[u8], key: &[u8]) -> Option<&'a Entry> {
-    state.entries.get(&pair_hash(bucket, key)).and_then(|list| {
-        list.iter().find(|entry| {
-            entry.bucket.get(&state.mmap) == bucket && entry.key.get(&state.mmap) == key
+        let db = DBInner::open(file, self.pagesize, self.flags)?;
+        Ok(DB {
+            inner: Arc::new(db),
         })
-    })
+    }
 }
 
-fn hash(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+impl Default for OpenOptions {
+    fn default() -> Self {
+        let pagesize = get_page_size() as u64;
+        if pagesize < 1024 {
+            panic!("Pagesize must be 1024 bytes minimum");
+        }
+        OpenOptions {
+            pagesize,
+            num_pages: DEFAULT_NUM_PAGES,
+            flags: DBFlags {
+                strict_mode: false,
+                mmap_populate: false,
+                direct_writes: false,
+            },
+        }
     }
-    hash
 }
 
-fn pair_hash(bucket: &[u8], key: &[u8]) -> u64 {
-    let mut combined = hash(bucket);
-    combined ^= 0xff;
-    combined = combined.wrapping_mul(0x0000_0100_0000_01b3);
-    for byte in key {
-        combined ^= u64::from(*byte);
-        combined = combined.wrapping_mul(0x0000_0100_0000_01b3);
+pub(crate) struct DBFlags {
+    pub(crate) strict_mode: bool,
+    pub(crate) mmap_populate: bool,
+    pub(crate) direct_writes: bool,
+}
+
+/// A database
+///
+/// A DB can created from an [`OpenOptions`] builder, or by calling [`open`](#method.open).
+/// From a DB, you can create a [`Tx`] to access the data in the database.
+/// If you want to use the database across threads, so you can `clone` the database
+/// to have concurrent transactions (you're really just cloning an [`Arc`] so it's pretty cheap).
+/// **Do not** try to open multiple transactions in the same thread, you're pretty likely to cause a deadlock.
+#[derive(Clone)]
+pub struct DB {
+    pub(crate) inner: Arc<DBInner>,
+}
+
+impl DB {
+    /// Opens a database using the default [`OpenOptions`].
+    ///
+    /// Same as calling `OpenOptions::new().open(path)`.
+    /// Please read the documentation for [`OpenOptions::open`](struct.OpenOptions.html#method.open) for details.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use inspace::{DB};
+    /// # use inspace::Error;
+    ///
+    /// # fn main() -> Result<(), Error> {
+    /// let db = DB::open("my.db")?;
+    ///
+    /// // do whatever you want with the DB
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<DB> {
+        OpenOptions::new().open(path)
     }
-    combined
+
+    /// Creates a [`Tx`].
+    /// This transaction is either read-only or writable depending on the `writable` parameter.
+    /// Please read the docs on a [`Tx`] for more details.
+    pub fn tx(&self, writable: bool) -> Result<Tx> {
+        Tx::new(self, writable)
+    }
+
+    /// Returns the database's pagesize.
+    pub fn pagesize(&self) -> u64 {
+        self.inner.pagesize
+    }
+
+    #[doc(hidden)]
+    pub fn check(&self) -> Result<()> {
+        self.tx(false)?.check()
+    }
+}
+pub(crate) struct DBInner {
+    pub(crate) data: Mutex<Arc<Mmap>>,
+    pub(crate) mmap_lock: RwLock<()>,
+    pub(crate) freelist: Mutex<Freelist>,
+    pub(crate) file: Mutex<File>,
+    pub(crate) open_ro_txs: Mutex<Vec<u64>>,
+    pub(crate) flags: DBFlags,
+
+    pub(crate) pagesize: u64,
+}
+
+impl DBInner {
+    pub(crate) fn open(file: File, pagesize: u64, flags: DBFlags) -> Result<DBInner> {
+        file.lock_exclusive()?;
+        let mmap = mmap(&file, flags.mmap_populate)?;
+        let mmap = Mutex::new(Arc::new(mmap));
+        let db = DBInner {
+            data: mmap,
+            mmap_lock: RwLock::new(()),
+            freelist: Mutex::new(Freelist::new()),
+
+            file: Mutex::new(file),
+            open_ro_txs: Mutex::new(Vec::new()),
+
+            pagesize,
+            flags,
+        };
+
+        {
+            let meta = db.meta()?;
+            let data = db.data.lock()?;
+            let free_pages = Page::from_buf(&data, meta.freelist_page, pagesize).freelist();
+
+            if !free_pages.is_empty() {
+                db.freelist.lock()?.init(free_pages);
+            }
+        }
+
+        Ok(db)
+    }
+
+    pub(crate) fn resize(&self, file: &File, new_size: u64) -> Result<Arc<Mmap>> {
+        file.allocate(new_size)?;
+        let _lock = self.mmap_lock.write()?;
+        let mut data = self.data.lock()?;
+        let mmap = mmap(file, self.flags.mmap_populate)?;
+        *data = Arc::new(mmap);
+        Ok(data.clone())
+    }
+
+    pub(crate) fn meta(&self) -> Result<Meta> {
+        let data = self.data.lock()?;
+
+        macro_rules! check_meta {
+            ($func:ident) => {{
+                let meta1 = Page::from_buf(&data, 0, self.pagesize).$func();
+                // Double check that we have the right pagesize before we read the second page.
+                if meta1.valid() && meta1.pagesize != self.pagesize {
+                    assert_eq!(
+                        meta1.pagesize, self.pagesize,
+                        "Invalid pagesize from meta1 {}. Expected {}.",
+                        meta1.pagesize, self.pagesize
+                    );
+                }
+                let meta2 = Page::from_buf(&data, 1, self.pagesize).$func();
+                match (meta1.valid(), meta2.valid()) {
+                    (true, true) => {
+                        assert_eq!(
+                            meta1.pagesize, self.pagesize,
+                            "Invalid pagesize from meta1 {}. Expected {}.",
+                            meta1.pagesize, self.pagesize
+                        );
+                        assert_eq!(
+                            meta2.pagesize, self.pagesize,
+                            "Invalid pagesize from meta2 {}. Expected {}.",
+                            meta2.pagesize, self.pagesize
+                        );
+                        if meta1.tx_id > meta2.tx_id {
+                            Some(meta1)
+                        } else {
+                            Some(meta2)
+                        }
+                    }
+                    (true, false) => {
+                        assert_eq!(
+                            meta1.pagesize, self.pagesize,
+                            "Invalid pagesize from meta1 {}. Expected {}.",
+                            meta1.pagesize, self.pagesize
+                        );
+                        Some(meta1)
+                    }
+                    (false, true) => {
+                        assert_eq!(
+                            meta2.pagesize, self.pagesize,
+                            "Invalid pagesize from meta2 {}. Expected {}.",
+                            meta2.pagesize, self.pagesize
+                        );
+                        Some(meta2)
+                    }
+                    (false, false) => None,
+                }
+            }};
+        }
+
+        if let Some(meta) = check_meta!(meta) {
+            Ok(meta.clone())
+        } else if let Some(old_meta) = check_meta!(old_meta) {
+            Ok(old_meta.into())
+        } else {
+            panic!("NO VALID META PAGES");
+        }
+    }
+}
+
+fn init_file(path: &Path, pagesize: u64, num_pages: usize, direct_write: bool) -> Result<File> {
+    let mut file = open_file(path, true, direct_write)?;
+    file.allocate(pagesize * (num_pages as u64))?;
+    let mut buf = vec![0; (pagesize * 4) as usize];
+    let mut get_page = |index: u64| {
+        #[allow(clippy::cast_ptr_alignment)]
+        unsafe {
+            &mut *(&mut buf[(index * pagesize) as usize] as *mut u8 as *mut Page)
+        }
+    };
+    for i in 0..2 {
+        let page = get_page(i);
+        page.id = i;
+        page.page_type = Page::TYPE_META;
+        let m = page.meta_mut();
+        m.meta_page = i as u32;
+        m.magic = MAGIC_VALUE;
+        m.version = VERSION;
+        m.pagesize = pagesize;
+        m.freelist_page = 2;
+        m.root = BucketMeta {
+            root_page: 3,
+            next_int: 0,
+        };
+        m.num_pages = 4;
+        m.hash = m.hash_self();
+    }
+
+    let p = get_page(2);
+    p.id = 2;
+    p.page_type = Page::TYPE_FREELIST;
+    p.count = 0;
+
+    let p = get_page(3);
+    p.id = 3;
+    p.page_type = Page::TYPE_LEAF;
+    p.count = 0;
+
+    file.write_all(&buf[..])?;
+    file.flush()?;
+    file.sync_all()?;
+    Ok(file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::RandomFile;
+
+    #[test]
+    fn test_open_options() {
+        assert_ne!(get_page_size(), 5000);
+        let random_file = RandomFile::new();
+        {
+            let db = OpenOptions::new()
+                .pagesize(5000)
+                .num_pages(100)
+                .open(&random_file)
+                .unwrap();
+            assert_eq!(db.pagesize(), 5000);
+        }
+        {
+            let metadata = random_file.path.metadata().unwrap();
+            assert!(metadata.is_file());
+            assert_eq!(metadata.len(), 500_000);
+        }
+        {
+            let db = OpenOptions::new()
+                .pagesize(5000)
+                .num_pages(100)
+                .open(&random_file)
+                .unwrap();
+            assert_eq!(db.pagesize(), 5000);
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_open_options_min_pages() {
+        OpenOptions::new().num_pages(3);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_open_options_min_pagesize() {
+        OpenOptions::new().pagesize(1000);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_different_pagesizes() {
+        assert_ne!(get_page_size(), 5000);
+        let random_file = RandomFile::new();
+        {
+            let db = OpenOptions::new()
+                .pagesize(5000)
+                .num_pages(100)
+                .open(&random_file)
+                .unwrap();
+            assert_eq!(db.pagesize(), 5000);
+        }
+        DB::open(&random_file).unwrap();
+    }
+}
+
+// Have different mmap functions for Unix and Windows
+#[cfg(unix)]
+fn mmap(file: &File, populate: bool) -> Result<Mmap> {
+    use memmap2::MmapOptions;
+
+    let mut options = MmapOptions::new();
+    if populate {
+        options.populate();
+    }
+    let mmap = unsafe { options.map(file)? };
+    // On Unix we advice the OS that page access will be random.
+    mmap.advise(memmap2::Advice::Random)?;
+    Ok(mmap)
+}
+
+// On Windows there is no advice to give.
+#[cfg(windows)]
+fn mmap(file: &File, populate: bool) -> Result<Mmap> {
+    let mmap = unsafe { Mmap::map(file)? };
+    Ok(mmap)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const O_DIRECT: libc::c_int = libc::O_DIRECT;
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const O_DIRECT: libc::c_int = 0;
+
+// Have different mmap functions for Unix and Windows
+#[cfg(unix)]
+fn open_file<P: AsRef<Path>>(path: P, create: bool, direct_write: bool) -> Result<File> {
+    let mut open_options = FileOpenOptions::new();
+    open_options.write(true).read(true);
+    if create {
+        open_options.create_new(true);
+    }
+    if direct_write {
+        open_options.custom_flags(O_DIRECT);
+    }
+    Ok(open_options.open(path)?)
+}
+
+#[cfg(windows)]
+fn open_file<P: AsRef<Path>>(path: P, create: bool, direct_write: bool) -> Result<File> {
+    let mut open_options = FileOpenOptions::new();
+    open_options.write(true).read(true);
+    if create {
+        open_options.create_new(true);
+    }
+    Ok(open_options.open(path)?)
 }
