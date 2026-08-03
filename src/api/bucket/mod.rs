@@ -22,6 +22,7 @@ use crate::{
 
 mod atomic;
 mod inner;
+mod map;
 pub use atomic::AtomicResult;
 pub(crate) use inner::{BucketMeta, InnerBucket, META_SIZE};
 
@@ -91,6 +92,7 @@ pub struct Bucket<'b, 'tx: 'b> {
 }
 
 impl<'b, 'tx> Bucket<'b, 'tx> {
+    #[cfg(feature = "typed")]
     pub(crate) fn clone_handle(&self) -> Self {
         Self {
             inner: self.inner.clone(),

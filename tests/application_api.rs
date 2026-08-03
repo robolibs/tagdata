@@ -226,3 +226,19 @@ fn collection_definitions_support_stable_nested_paths() -> Result<(), Box<dyn st
     })?;
     Ok(())
 }
+
+#[test]
+fn ordered_bulk_load_validates_monotonic_input() -> Result<(), Box<dyn std::error::Error>> {
+    let file = common::RandomFile::new();
+    let db = DB::open(&file)?;
+    db.write(|tx| {
+        let counters = tx.collection_mut(COUNTERS)?;
+        assert_eq!(counters.insert_ordered([(1, 10), (2, 20), (3, 30)])?, 3);
+        assert!(matches!(
+            counters.insert_ordered([(5, 50), (4, 40)]),
+            Err(CodecError::InputNotOrdered)
+        ));
+        Ok::<_, TransactionError<CodecError>>(())
+    })?;
+    Ok(())
+}

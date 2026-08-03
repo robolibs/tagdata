@@ -201,3 +201,32 @@ fn atomic_operations_reject_read_only_transactions_and_bucket_values() -> Result
         Ok(())
     })
 }
+
+#[test]
+fn raw_buckets_offer_map_style_bulk_and_boundary_operations() -> Result<(), Error> {
+    let file = common::RandomFile::new();
+    let db = DB::open(&file)?;
+    db.update(|tx| {
+        let map = tx.create_bucket("map")?;
+        assert_eq!(
+            map.insert_many([
+                (b"a1".to_vec(), b"1".to_vec()),
+                (b"a2".to_vec(), b"2".to_vec()),
+                (b"b1".to_vec(), b"3".to_vec()),
+            ])?,
+            3
+        );
+        assert!(map.contains_key("a1"));
+        assert_eq!(map.len(), 3);
+        assert_eq!(map.first().unwrap().key(), b"a1");
+        assert_eq!(map.last().unwrap().key(), b"b1");
+        assert_eq!(
+            map.multi_get([b"a1".as_slice(), b"missing".as_slice()]),
+            vec![Some(b"1".to_vec()), None]
+        );
+        assert_eq!(map.delete_prefix("a"), Ok(2));
+        assert_eq!(map.remove("b1")?, Some(b"3".to_vec()));
+        assert!(map.is_empty());
+        Ok(())
+    })
+}

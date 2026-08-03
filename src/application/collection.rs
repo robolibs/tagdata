@@ -302,6 +302,30 @@ where
         keys.into_iter().map(|key| self.remove(&key)).collect()
     }
 
+    /// Inserts strictly increasing input through one collection handle.
+    pub fn insert_ordered<I>(&self, entries: I) -> Result<usize, CodecError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+    {
+        if !C::ORDER_PRESERVING {
+            return Err(CodecError::OrderingRequired);
+        }
+        let mut previous = None::<Vec<u8>>;
+        let mut count = 0;
+        for (key, value) in entries {
+            let key = self.read.codec.encode_key(&key)?;
+            if previous.as_ref().is_some_and(|prior| prior >= &key) {
+                return Err(CodecError::InputNotOrdered);
+            }
+            let value = self.read.codec.encode_value(&value)?;
+            self.read.raw.put(key.clone(), value)?;
+            self.read.raw.clear_ttl(&key)?;
+            previous = Some(key);
+            count += 1;
+        }
+        Ok(count)
+    }
+
     pub fn clear(&self) -> Result<usize, CodecError> {
         let keys = self
             .read
