@@ -10,6 +10,10 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = []
+test-hooks = []
+
 [dependencies]
 libc = "0.2.149"
 memmap2 = "0.9.11"

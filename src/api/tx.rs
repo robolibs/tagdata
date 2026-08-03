@@ -19,6 +19,7 @@ use crate::{
     meta::Meta,
     node::Node,
     page::{Page, PageID, Pages},
+    support::failpoints,
 };
 
 pub(crate) enum TxLock<'tx> {
@@ -252,7 +253,9 @@ impl<'tx> Tx<'tx> {
         bucket.cursor().to_buckets()
     }
 
-    /// Writes the changes made in the writeable transaction to the underlying file.
+    /// Writes the changes made in the writable transaction to the underlying file.
+    /// Data pages are synced before the metadata page that publishes the transaction.
+    /// The metadata page is then synced before this method returns.
     ///
     /// # Errors
     ///
@@ -318,6 +321,11 @@ impl<'tx> TxInner<'tx> {
                     file.write_all(buf)?;
                 }
             }
+
+            failpoints::hit("after-data-write");
+            file.flush()?;
+            file.sync_all()?;
+            failpoints::hit("after-data-sync");
         }
         if self.db.inner.flags.strict_mode {
             self.check()?;
@@ -347,8 +355,10 @@ impl<'tx> TxInner<'tx> {
                 file.write_all(buf.as_slice())?;
             }
 
+            failpoints::hit("after-meta-write");
             file.flush()?;
             file.sync_all()?;
+            failpoints::hit("after-meta-sync");
 
             let mut lock = self.db.inner.freelist.lock()?;
             *lock = freelist.inner.clone();

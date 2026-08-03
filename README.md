@@ -50,6 +50,11 @@ Write transactions update a copy-on-write B+ tree and publish a new meta page
 when committed. Large nodes can span multiple pages, and the freelist makes
 released pages available to future writes.
 
+Commits use two durability barriers: changed data and freelist pages are synced
+before the alternate meta page is published, then the meta page is synced before
+the commit returns. After an interrupted commit, reopening selects either the
+complete previous snapshot or the complete newly published snapshot.
+
 ## Commands
 
 ```sh
