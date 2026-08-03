@@ -16,6 +16,10 @@ See [acknowledgments](ACKOLEGMENT.md) for prior work that informed the project.
 - **Space reuse:** freed pages are tracked and reused by later transactions.
 - **Configurable opening:** page size, initial allocation, mmap population, strict
   checks, and direct writes are available through `OpenOptions`.
+- **Read-only handles:** existing databases can be opened from read-only files
+  and shared safely by multiple reader processes.
+- **Runtime statistics:** file, page, freelist, transaction, and reader state is
+  available through `DB::stats()`.
 
 ```rust
 use inspace::{DB, Error};
@@ -54,6 +58,9 @@ Commits use two durability barriers: changed data and freelist pages are synced
 before the alternate meta page is published, then the meta page is synced before
 the commit returns. After an interrupted commit, reopening selects either the
 complete previous snapshot or the complete newly published snapshot.
+
+Use `OpenOptions::new().read_only()` for a handle that never creates, resizes, or
+writes the database. A read-only handle rejects writable transactions.
 
 ## Commands
 

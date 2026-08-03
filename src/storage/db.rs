@@ -4,7 +4,10 @@ use std::{
     fs::{File, OpenOptions as FileOpenOptions},
     io::Write,
     path::Path,
-    sync::{Arc, Mutex, RwLock},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use fs4::FileExt;
@@ -12,7 +15,8 @@ use memmap2::Mmap;
 use page_size::get as get_page_size;
 
 use crate::{
-    bucket::BucketMeta, errors::Result, freelist::Freelist, meta::Meta, page::Page, tx::Tx,
+    bucket::BucketMeta, errors::Result, freelist::Freelist, meta::Meta, page::Page, stats::Stats,
+    tx::Tx,
 };
 
 const MAGIC_VALUE: u32 = 0x00AB_CDEF;
@@ -121,6 +125,13 @@ impl OpenOptions {
         self
     }
 
+    /// Opens an existing database without write permission.
+    pub fn read_only(mut self) -> Self {
+        self.flags.read_only = true;
+        self.flags.direct_writes = false;
+        self
+    }
+
     /// Opens the database with the current options.
     ///
     /// If the file does not exist, it will initialize an empty database with a size of (`num_pages * pagesize`) bytes.
@@ -138,7 +149,9 @@ impl OpenOptions {
     /// Will panic if the pagesize the database is opened with is not the same as the pagesize it was created with.
     pub fn open<P: AsRef<Path>>(self, path: P) -> Result<DB> {
         let path: &Path = path.as_ref();
-        let file = if !path.exists() {
+        let file = if self.flags.read_only {
+            open_file(path, false, false, true)?
+        } else if !path.exists() {
             init_file(
                 path,
                 self.pagesize,
@@ -146,7 +159,7 @@ impl OpenOptions {
                 self.flags.direct_writes,
             )?
         } else {
-            open_file(path, false, self.flags.direct_writes)?
+            open_file(path, false, self.flags.direct_writes, false)?
         };
 
         let db = DBInner::open(file, self.pagesize, self.flags)?;
@@ -169,6 +182,7 @@ impl Default for OpenOptions {
                 strict_mode: false,
                 mmap_populate: false,
                 direct_writes: false,
+                read_only: false,
             },
         }
     }
@@ -178,6 +192,7 @@ pub(crate) struct DBFlags {
     pub(crate) strict_mode: bool,
     pub(crate) mmap_populate: bool,
     pub(crate) direct_writes: bool,
+    pub(crate) read_only: bool,
 }
 
 /// A database
@@ -227,6 +242,38 @@ impl DB {
         self.inner.pagesize
     }
 
+    /// Returns a point-in-time snapshot of database statistics.
+    pub fn stats(&self) -> Result<Stats> {
+        let file_bytes = self.inner.file.lock()?.metadata()?.len();
+        let meta = self.inner.meta()?;
+        let (free_pages, pending_pages) = {
+            let freelist = self.inner.freelist.lock()?;
+            (freelist.free_count(), freelist.pending_count())
+        };
+        let (active_readers, oldest_reader_tx_id) = {
+            let readers = self.inner.open_ro_txs.lock()?;
+            (readers.len() as u64, readers.first().copied())
+        };
+
+        Ok(Stats {
+            file_bytes,
+            page_size: self.inner.pagesize,
+            allocated_pages: meta.num_pages,
+            free_pages,
+            pending_pages,
+            reader_pinned_pages: if active_readers == 0 {
+                0
+            } else {
+                pending_pages
+            },
+            current_tx_id: meta.tx_id,
+            active_readers,
+            oldest_reader_tx_id,
+            committed_transactions: self.inner.committed_transactions.load(Ordering::Relaxed),
+            bytes_written: self.inner.bytes_written.load(Ordering::Relaxed),
+        })
+    }
+
     #[doc(hidden)]
     pub fn check(&self) -> Result<()> {
         self.tx(false)?.check()
@@ -241,11 +288,17 @@ pub(crate) struct DBInner {
     pub(crate) flags: DBFlags,
 
     pub(crate) pagesize: u64,
+    pub(crate) committed_transactions: AtomicU64,
+    pub(crate) bytes_written: AtomicU64,
 }
 
 impl DBInner {
     pub(crate) fn open(file: File, pagesize: u64, flags: DBFlags) -> Result<DBInner> {
-        file.lock_exclusive()?;
+        if flags.read_only {
+            FileExt::lock_shared(&file)?;
+        } else {
+            FileExt::lock_exclusive(&file)?;
+        }
         let mmap = mmap(&file, flags.mmap_populate)?;
         let mmap = Mutex::new(Arc::new(mmap));
         let db = DBInner {
@@ -258,6 +311,8 @@ impl DBInner {
 
             pagesize,
             flags,
+            committed_transactions: AtomicU64::new(0),
+            bytes_written: AtomicU64::new(0),
         };
 
         {
@@ -347,7 +402,7 @@ impl DBInner {
 }
 
 fn init_file(path: &Path, pagesize: u64, num_pages: usize, direct_write: bool) -> Result<File> {
-    let mut file = open_file(path, true, direct_write)?;
+    let mut file = open_file(path, true, direct_write, false)?;
     file.allocate(pagesize * (num_pages as u64))?;
     let mut buf = vec![0; (pagesize * 4) as usize];
     let mut get_page = |index: u64| {
@@ -482,9 +537,14 @@ const O_DIRECT: libc::c_int = 0;
 
 // Have different mmap functions for Unix and Windows
 #[cfg(unix)]
-fn open_file<P: AsRef<Path>>(path: P, create: bool, direct_write: bool) -> Result<File> {
+fn open_file<P: AsRef<Path>>(
+    path: P,
+    create: bool,
+    direct_write: bool,
+    read_only: bool,
+) -> Result<File> {
     let mut open_options = FileOpenOptions::new();
-    open_options.write(true).read(true);
+    open_options.read(true).write(!read_only);
     if create {
         open_options.create_new(true);
     }
@@ -495,9 +555,14 @@ fn open_file<P: AsRef<Path>>(path: P, create: bool, direct_write: bool) -> Resul
 }
 
 #[cfg(windows)]
-fn open_file<P: AsRef<Path>>(path: P, create: bool, direct_write: bool) -> Result<File> {
+fn open_file<P: AsRef<Path>>(
+    path: P,
+    create: bool,
+    _direct_write: bool,
+    read_only: bool,
+) -> Result<File> {
     let mut open_options = FileOpenOptions::new();
-    open_options.write(true).read(true);
+    open_options.read(true).write(!read_only);
     if create {
         open_options.create_new(true);
     }

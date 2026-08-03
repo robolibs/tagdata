@@ -42,7 +42,10 @@ fn main() -> Result<(), Error> {
         "mmap reads:  {:>10.0} ops/s ({read_elapsed:?})",
         ITEMS as f64 / read_elapsed.as_secs_f64()
     );
-    println!("file size:   {} bytes", fs::metadata(&path)?.len());
+    let stats = db.stats()?;
+    println!("file size:   {} bytes", stats.file_bytes);
+    println!("pages:       {} allocated", stats.allocated_pages);
+    println!("written:     {} bytes", stats.bytes_written);
 
     fs::remove_file(path)?;
     Ok(())

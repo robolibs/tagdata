@@ -21,8 +21,8 @@ without weakening its compact byte-oriented API or zero-copy read path.
 | Phase | Work | Status | Depends on |
 |---|---|---|---|
 | 0 | Crash-proof commits and failure injection | DONE | Current engine |
-| 1 | Statistics and diagnostics | TODO | Phase 0 |
-| 2 | Genuine read-only opening | TODO | Phase 0 |
+| 1 | Statistics and diagnostics | DONE | Phase 0 |
+| 2 | Genuine read-only opening | DONE | Phase 0 |
 | 3 | Multi-process readers and one writer | TODO | Phases 1-2 |
 | 4 | Snapshot backup and offline compaction | TODO | Phase 3 |
 | 5 | Versioned pages and checksums | TODO | Phase 0 |

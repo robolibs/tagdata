@@ -89,6 +89,14 @@ impl Freelist {
         }
     }
 
+    pub(crate) fn free_count(&self) -> u64 {
+        self.free_pages.len() as u64
+    }
+
+    pub(crate) fn pending_count(&self) -> u64 {
+        self.pending_pages.values().map(Vec::len).sum::<usize>() as u64
+    }
+
     pub(crate) fn init(&mut self, free_pages: &[PageID]) {
         free_pages.iter().for_each(|id| {
             self.free_pages.insert(*id);

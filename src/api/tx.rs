@@ -111,6 +111,9 @@ pub(crate) struct TxInner<'tx> {
 
 impl<'tx> Tx<'tx> {
     pub(crate) fn new(db: &'tx DB, writable: bool) -> Result<Tx<'tx>> {
+        if writable && db.inner.flags.read_only {
+            return Err(Error::ReadOnlyDB);
+        }
         let lock = match writable {
             true => TxLock::Rw(db.inner.file.lock()?),
             false => TxLock::Ro {
@@ -362,6 +365,20 @@ impl<'tx> TxInner<'tx> {
 
             let mut lock = self.db.inner.freelist.lock()?;
             *lock = freelist.inner.clone();
+            let written = freelist
+                .pages
+                .values()
+                .map(|(_, size)| *size as u64)
+                .sum::<u64>()
+                + self.db.inner.pagesize;
+            self.db
+                .inner
+                .committed_transactions
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.db
+                .inner
+                .bytes_written
+                .fetch_add(written, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         } else {
             unreachable!()
