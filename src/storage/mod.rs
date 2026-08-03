@@ -4,5 +4,7 @@ pub(crate) mod format;
 pub(crate) mod freelist;
 pub(crate) mod maintenance;
 pub(crate) mod meta;
+pub(crate) mod operator;
 pub(crate) mod page;
 pub(crate) mod stats;
+pub(crate) mod verification;

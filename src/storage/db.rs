@@ -418,7 +418,7 @@ impl DB {
 
     /// Validates checksums, page bounds, ordering, and reachability.
     pub fn verify(&self) -> Result<()> {
-        self.tx(false)?.check()
+        self.verify_report()?.into_result()
     }
 
     #[doc(hidden)]

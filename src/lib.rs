@@ -118,6 +118,8 @@ mod tree;
 
 pub(crate) use api::{bucket, changes, cursor, data, scoped, ttl, tx};
 pub(crate) use storage::format;
+pub(crate) use storage::operator;
+pub(crate) use storage::verification;
 pub(crate) use storage::{coordination, db, freelist, meta, page, stats};
 pub(crate) use support::{bytes, errors};
 pub(crate) use tree::{node, page_node};
@@ -135,10 +137,12 @@ pub use data::*;
 pub use db::{DB, OpenOptions};
 pub use errors::*;
 pub use format::FormatInfo;
+pub use operator::{SalvageManifest, SkippedRecord};
 pub use scoped::TransactionError;
 pub use stats::Stats;
 pub use ttl::TtlWriteResult;
 pub use tx::Tx;
+pub use verification::{VerifyIssue, VerifyReport};
 
 #[cfg(feature = "typed")]
 pub use typed::*;
