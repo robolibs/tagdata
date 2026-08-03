@@ -1,8 +1,22 @@
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
+    time::Duration,
+};
 
-use inspace::{DB, Error};
+use inspace::{DB, Error, TransactionError};
 
 mod common;
+
+#[derive(Debug, PartialEq, Eq)]
+enum DomainError {
+    Rejected,
+}
+
+impl std::fmt::Display for DomainError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "operation rejected")
+    }
+}
 
 #[test]
 fn named_and_scoped_transactions_commit_only_success() -> Result<(), Error> {
@@ -44,6 +58,74 @@ fn try_write_tx_never_waits_for_an_owned_writer_slot() -> Result<(), Error> {
 
     drop(writer);
     assert!(db.try_write_tx()?.is_some());
+    Ok(())
+}
+
+#[test]
+fn typed_scopes_preserve_domain_errors_and_roll_back() -> Result<(), Error> {
+    let file = common::RandomFile::new();
+    let db = DB::open(&file)?;
+
+    let result = db.write(|tx| {
+        tx.create_bucket("items")?.put("temporary", "value")?;
+        Err::<(), _>(TransactionError::application(DomainError::Rejected))
+    });
+    assert!(matches!(
+        result,
+        Err(TransactionError::Application(DomainError::Rejected))
+    ));
+
+    let absent = db
+        .read(|tx| Ok::<_, TransactionError<DomainError>>(tx.get_bucket("items").is_err()))
+        .expect("read scope succeeds");
+    assert!(absent);
+    Ok(())
+}
+
+#[test]
+fn typed_write_scope_releases_writer_after_panic() -> Result<(), Error> {
+    let file = common::RandomFile::new();
+    let db = DB::open(&file)?;
+
+    let panic = catch_unwind(AssertUnwindSafe(|| {
+        let _ = db.write(|tx| -> Result<(), TransactionError<DomainError>> {
+            tx.create_bucket("temporary")?;
+            panic!("stop");
+        });
+    }));
+    assert!(panic.is_err());
+
+    db.write(|tx| {
+        tx.create_bucket("committed")?;
+        Ok::<_, TransactionError<DomainError>>(())
+    })
+    .expect("writer slot remains usable");
+    Ok(())
+}
+
+#[test]
+fn writer_deadlines_time_out_and_recover() -> Result<(), Error> {
+    let file = common::RandomFile::new();
+    let db = DB::open(&file)?;
+    let writer = db.write_tx()?;
+
+    assert!(matches!(
+        db.write_tx_timeout(Duration::ZERO),
+        Err(Error::WriterTimeout)
+    ));
+    let scoped = db.write_timeout(Duration::from_millis(2), |_tx| {
+        Ok::<_, TransactionError<DomainError>>(())
+    });
+    assert!(matches!(
+        scoped,
+        Err(TransactionError::Storage(Error::WriterTimeout))
+    ));
+
+    drop(writer);
+    db.write_timeout(Duration::from_millis(50), |_tx| {
+        Ok::<_, TransactionError<DomainError>>(())
+    })
+    .expect("writer acquisition succeeds after release");
     Ok(())
 }
 

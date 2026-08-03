@@ -278,6 +278,14 @@ impl DB {
         Tx::try_new_writable(self)
     }
 
+    /// Waits up to `timeout` for the single writer slot.
+    pub fn write_tx_timeout(&self, timeout: std::time::Duration) -> Result<Tx<'_>> {
+        if self.inner.flags.read_only {
+            return Err(Error::ReadOnlyDB);
+        }
+        Tx::new_writable_timeout(self, timeout)
+    }
+
     /// Runs synchronous work in a read-only transaction.
     pub fn view<T>(&self, operation: impl FnOnce(&Tx<'_>) -> Result<T>) -> Result<T> {
         let tx = self.read_tx()?;

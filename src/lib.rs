@@ -116,7 +116,7 @@ mod storage;
 mod support;
 mod tree;
 
-pub(crate) use api::{bucket, changes, cursor, data, ttl, tx};
+pub(crate) use api::{bucket, changes, cursor, data, scoped, ttl, tx};
 pub(crate) use storage::{coordination, db, freelist, meta, page, stats};
 pub(crate) use support::{bytes, errors};
 pub(crate) use tree::{node, page_node};
@@ -130,6 +130,7 @@ pub use cursor::{Buckets, Cursor, KVPairs, ToBuckets, ToKVPairs};
 pub use data::*;
 pub use db::{DB, OpenOptions};
 pub use errors::*;
+pub use scoped::TransactionError;
 pub use stats::Stats;
 pub use ttl::TtlWriteResult;
 pub use tx::Tx;

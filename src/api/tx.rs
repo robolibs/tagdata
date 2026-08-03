@@ -167,26 +167,46 @@ pub(crate) struct TxInner<'tx> {
 
 impl<'tx> Tx<'tx> {
     pub(crate) fn new(db: &'tx DB, writable: bool) -> Result<Tx<'tx>> {
-        Ok(Self::new_impl(db, writable, false)?.unwrap())
+        Ok(Self::new_impl(db, writable, WriteMode::Blocking)?.unwrap())
     }
 
     pub(crate) fn try_new_writable(db: &'tx DB) -> Result<Option<Tx<'tx>>> {
-        Self::new_impl(db, true, true)
+        Self::new_impl(db, true, WriteMode::Try)
     }
 
-    fn new_impl(db: &'tx DB, writable: bool, try_write: bool) -> Result<Option<Tx<'tx>>> {
+    pub(crate) fn new_writable_timeout(
+        db: &'tx DB,
+        timeout: std::time::Duration,
+    ) -> Result<Tx<'tx>> {
+        let deadline = std::time::Instant::now()
+            .checked_add(timeout)
+            .unwrap_or_else(std::time::Instant::now);
+        Self::new_impl(db, true, WriteMode::Deadline(deadline))?.ok_or(Error::WriterTimeout)
+    }
+
+    fn new_impl(db: &'tx DB, writable: bool, mode: WriteMode) -> Result<Option<Tx<'tx>>> {
         if writable && db.inner.flags.read_only {
             return Err(Error::ReadOnlyDB);
         }
 
         let (lock, meta, freelist) = if writable {
-            let lock = if try_write {
-                let Some(lock) = WriteGuard::try_new(db)? else {
-                    return Ok(None);
-                };
-                lock
-            } else {
-                WriteGuard::new(db)?
+            let lock = match mode {
+                WriteMode::Blocking => WriteGuard::new(db)?,
+                WriteMode::Try => {
+                    let Some(lock) = WriteGuard::try_new(db)? else {
+                        return Ok(None);
+                    };
+                    lock
+                }
+                WriteMode::Deadline(deadline) => loop {
+                    if let Some(lock) = WriteGuard::try_new(db)? {
+                        break lock;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(Error::WriterTimeout);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                },
             };
             db.inner.refresh(&lock.file)?;
             db.inner.reload_freelist()?;
@@ -406,6 +426,13 @@ impl<'tx> Tx<'tx> {
     pub(crate) fn check(&self) -> Result<()> {
         self.inner.borrow().check()
     }
+}
+
+#[derive(Clone, Copy)]
+enum WriteMode {
+    Blocking,
+    Try,
+    Deadline(std::time::Instant),
 }
 
 impl<'tx> TxInner<'tx> {
@@ -643,128 +670,5 @@ impl<'tx> Drop for TxInner<'tx> {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::mem::size_of;
-
-    use super::*;
-    use crate::{
-        db::{DB, OpenOptions},
-        testutil::RandomFile,
-    };
-
-    #[test]
-    fn test_ro_txs() -> Result<()> {
-        let random_file = RandomFile::new();
-        let db = DB::open(&random_file)?;
-
-        {
-            let tx = db.tx(true)?;
-            assert!(tx.create_bucket("abc").is_ok());
-            tx.commit()?;
-        }
-
-        let tx = db.tx(false)?;
-        assert!(tx.create_bucket("def").is_err());
-        let b = tx.get_bucket("abc")?;
-        assert_eq!(b.put("key", "value"), Err(Error::ReadOnlyTx));
-        assert_eq!(b.delete("key"), Err(Error::ReadOnlyTx));
-        assert_eq!(b.create_bucket("dev").err(), Some(Error::ReadOnlyTx));
-        assert_eq!(tx.commit(), Err(Error::ReadOnlyTx));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_concurrent_txs() -> Result<()> {
-        let random_file = RandomFile::new();
-        let db = OpenOptions::new()
-            .pagesize(1024)
-            // make sure we have plenty of pages so we don't have to resize while the read-only tx is open
-            .num_pages(10)
-            .open(&random_file)?;
-        {
-            // create a read-only tx
-            let tx = db.tx(false)?;
-            assert!(!tx.writable());
-            let tx = tx.inner.borrow_mut();
-            assert_eq!(tx.pages.data.len(), 1024 * 10);
-            assert!(!tx.lock.writable());
-            {
-                let open_ro_txs = tx.db.inner.open_ro_txs.lock().unwrap();
-                assert_eq!(open_ro_txs.len(), 1);
-                assert_eq!(open_ro_txs[0], tx.meta.tx_id);
-            }
-            {
-                // create a writable transaction while the read-only transaction is still open
-                let tx = db.tx(true)?;
-                assert!(tx.writable());
-                {
-                    {
-                        let inner = tx.inner.borrow_mut();
-                        assert_eq!(inner.meta.tx_id, 1);
-                        let freelist = inner.freelist.borrow();
-                        assert_eq!(freelist.inner.pages(), Vec::<u64>::new());
-                    }
-                    let b = tx.create_bucket("abc")?;
-                    b.put("123", "456")?;
-                }
-                tx.commit()?;
-            }
-            {
-                // create a second writable transaction while the read-only transaction is still open
-                let tx = db.tx(true)?;
-                assert!(tx.writable());
-                {
-                    {
-                        let inner = tx.inner.borrow_mut();
-                        let freelist = inner.freelist.borrow();
-                        assert_eq!(inner.meta.tx_id, 2);
-                        assert_eq!(freelist.inner.pages(), vec![2, 3]);
-                    }
-                    let b = tx.get_bucket("abc")?;
-                    b.put("123", "456")?;
-                }
-                tx.commit()?;
-            }
-            // let the read-only tx drop
-        }
-        {
-            // make sure we can reuse the freelist
-            let tx = db.tx(true)?;
-            assert!(tx.writable());
-            let inner = tx.inner.borrow_mut();
-            let mut freelist = inner.freelist.borrow_mut();
-            assert_eq!(freelist.inner.pages(), vec![2, 3, 4, 5, 6]);
-            // allocate some pages from the freelist
-            assert_eq!(freelist.meta.num_pages, 10);
-            let page = freelist.allocate(size_of::<Page>() as u64)?;
-            assert!(page.id == 2);
-            assert!(page.overflow == 0);
-
-            let page = freelist.allocate(size_of::<Page>() as u64)?;
-            assert!(page.id == 3);
-            assert!(page.overflow == 0);
-
-            let page = freelist.allocate(size_of::<Page>() as u64)?;
-            assert!(page.id == 4);
-            assert!(page.overflow == 0);
-
-            let page = freelist.allocate(size_of::<Page>() as u64)?;
-            assert!(page.id == 5);
-            assert!(page.overflow == 0);
-
-            let page = freelist.allocate(size_of::<Page>() as u64)?;
-            assert!(page.id == 6);
-            assert!(page.overflow == 0);
-
-            // freelist should be empty so make sure the page is new
-            assert_eq!(freelist.meta.num_pages, 10);
-            let page = freelist.allocate(size_of::<Page>() as u64)?;
-            assert!(page.id == 10);
-            assert!(page.overflow == 0);
-            assert_eq!(freelist.meta.num_pages, 11);
-            assert_eq!(freelist.inner.pages(), Vec::<u64>::new());
-        }
-        Ok(())
-    }
-}
+#[path = "tx_tests.rs"]
+mod tests;
