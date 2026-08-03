@@ -1,0 +1,16 @@
+[package]
+name = "inspace"
+version = "0.1.0"
+edition = "2024"
+description = "inspace"
+license = "MIT"
+readme = "README.md"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+memmap2 = "0.9.11"
+
+[dev-dependencies]
