@@ -19,6 +19,7 @@ pub enum OpenPolicy {
 #[derive(Clone, Copy, Debug)]
 pub struct CollectionDef<K, V, C> {
     pub(crate) name: &'static str,
+    pub(crate) parents: &'static [&'static str],
     pub(crate) schema_id: &'static str,
     pub(crate) schema_version: u32,
     pub(crate) policy: OpenPolicy,
@@ -32,6 +33,20 @@ impl<K, V, C> CollectionDef<K, V, C> {
     pub const fn new(name: &'static str, codec: C) -> Self {
         Self {
             name,
+            parents: &[],
+            schema_id: name,
+            schema_version: 1,
+            policy: OpenPolicy::CreateOrOpen,
+            codec,
+            marker: PhantomData,
+        }
+    }
+
+    /// Defines a collection nested below the supplied bucket path.
+    pub const fn nested(parents: &'static [&'static str], name: &'static str, codec: C) -> Self {
+        Self {
+            name,
+            parents,
             schema_id: name,
             schema_version: 1,
             policy: OpenPolicy::CreateOrOpen,
@@ -54,6 +69,10 @@ impl<K, V, C> CollectionDef<K, V, C> {
 
     pub const fn name(&self) -> &'static str {
         self.name
+    }
+
+    pub const fn parents(&self) -> &'static [&'static str] {
+        self.parents
     }
 
     pub const fn schema_id(&self) -> &'static str {

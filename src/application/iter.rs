@@ -2,6 +2,23 @@ use std::marker::PhantomData;
 
 use crate::{Bucket, CodecError, Cursor, Data, KeyCodec, ValueCodec};
 
+/// Opaque exclusive continuation point for a collection page.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PageToken(pub(crate) Vec<u8>);
+
+impl PageToken {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// One bounded page and the token needed to resume after it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScanPage<K, V> {
+    pub items: Vec<(K, V)>,
+    pub next: Option<PageToken>,
+}
+
 /// Lazy, allocation-bounded typed traversal of a collection.
 pub struct CollectionIter<'b, 'tx, K, V, C> {
     pub(crate) cursor: Cursor<'b, 'tx>,
@@ -10,6 +27,7 @@ pub struct CollectionIter<'b, 'tx, K, V, C> {
     pub(crate) remaining: Option<usize>,
     pub(crate) prefix: Option<Vec<u8>>,
     pub(crate) end_exclusive: Option<Vec<u8>>,
+    pub(crate) reverse: bool,
     pub(crate) marker: PhantomData<fn() -> (K, V)>,
 }
 
@@ -24,7 +42,12 @@ where
             return None;
         }
         loop {
-            let Data::KeyValue(pair) = self.cursor.next()? else {
+            let next = if self.reverse {
+                self.cursor.previous()
+            } else {
+                self.cursor.next()
+            };
+            let Data::KeyValue(pair) = next? else {
                 continue;
             };
             if let Some(prefix) = &self.prefix

@@ -64,6 +64,7 @@ pub struct Cursor<'b, 'tx> {
     changes: Rc<RefCell<ChangeTracker>>,
     stack: Vec<SearchPath>,
     next_called: bool,
+    previous_called: bool,
     _phantom: PhantomData<&'b ()>,
 }
 
@@ -77,6 +78,7 @@ impl<'b, 'tx> Cursor<'b, 'tx> {
             changes: b.changes.clone(),
             stack: Vec::new(),
             next_called: false,
+            previous_called: false,
             _phantom: PhantomData,
         }
     }
@@ -88,6 +90,7 @@ impl<'b, 'tx> Cursor<'b, 'tx> {
     /// Returns whether or not the key exists in the bucket.
     pub fn seek<T: AsRef<[u8]>>(&mut self, key: T) -> bool {
         self.next_called = false;
+        self.previous_called = false;
         let mut b = self.bucket.borrow_mut();
         if b.deleted {
             panic!("Cannot seek cursor on a deleted bucket.");
@@ -138,6 +141,78 @@ impl<'b, 'tx> Cursor<'b, 'tx> {
             });
         }
     }
+
+    /// Positions the cursor at the greatest key in the bucket.
+    pub fn seek_last(&mut self) {
+        self.stack.clear();
+        self.next_called = false;
+        self.previous_called = false;
+        let b = self.bucket.borrow();
+        let mut id = PageNodeID::Page(b.meta.root_page);
+        loop {
+            let page_node = b.page_node(id);
+            if page_node.len() == 0 {
+                return;
+            }
+            let index = page_node.len() - 1;
+            self.stack.push(SearchPath { index, id });
+            if page_node.leaf() {
+                return;
+            }
+            id = PageNodeID::Page(page_node.index_page(index));
+        }
+    }
+
+    /// Returns the current item and then traverses toward smaller keys.
+    pub fn previous(&mut self) -> Option<Data<'b, 'tx>> {
+        if self.stack.is_empty() {
+            self.seek_last();
+        } else if self.previous_called {
+            loop {
+                let (moved, descend) = {
+                    let b = self.bucket.borrow();
+                    let element = self.stack.last_mut()?;
+                    if element.index == 0 {
+                        (false, None)
+                    } else {
+                        element.index -= 1;
+                        let node = b.page_node(element.id);
+                        (
+                            true,
+                            (!node.leaf())
+                                .then(|| PageNodeID::Page(node.index_page(element.index))),
+                        )
+                    }
+                };
+                if !moved {
+                    self.stack.pop();
+                    if self.stack.is_empty() {
+                        return None;
+                    }
+                    continue;
+                }
+                if let Some(mut id) = descend {
+                    let b = self.bucket.borrow();
+                    loop {
+                        let node = b.page_node(id);
+                        if node.len() == 0 {
+                            return None;
+                        }
+                        let index = node.len() - 1;
+                        self.stack.push(SearchPath { index, id });
+                        if node.leaf() {
+                            break;
+                        }
+                        id = PageNodeID::Page(node.index_page(index));
+                    }
+                }
+                break;
+            }
+        }
+        self.previous_called = true;
+        self.next_called = false;
+        self.current()
+    }
 }
 
 // function that searches the bucket for a given key
@@ -175,6 +250,7 @@ impl<'b, 'tx> Iterator for Cursor<'b, 'tx> {
     type Item = Data<'b, 'tx>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        self.previous_called = false;
         if self.stack.is_empty() {
             self.seek_first();
         } else if self.next_called {

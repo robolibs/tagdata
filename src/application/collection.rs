@@ -2,7 +2,7 @@ use std::{marker::PhantomData, ops::Add, time::SystemTime};
 
 use crate::{Bucket, CodecError, KeyCodec, ValueCodec};
 
-use super::{CollectionIter, CompareOutcome, Entry};
+use super::{CollectionIter, CompareOutcome, Entry, PageToken, ScanPage};
 
 /// Optional behavior attached to a typed write.
 #[derive(Clone, Copy, Debug, Default)]
@@ -75,6 +75,22 @@ where
             remaining: None,
             prefix: None,
             end_exclusive: None,
+            reverse: false,
+            marker: PhantomData,
+        }
+    }
+
+    pub fn iter_rev(&self) -> CollectionIter<'b, 'tx, K, V, C> {
+        let mut cursor = self.raw.cursor();
+        cursor.seek_last();
+        CollectionIter {
+            cursor,
+            raw: self.raw.clone_handle(),
+            codec: self.codec.clone(),
+            remaining: None,
+            prefix: None,
+            end_exclusive: None,
+            reverse: true,
             marker: PhantomData,
         }
     }
@@ -89,8 +105,54 @@ where
             remaining: None,
             prefix: Some(prefix.to_vec()),
             end_exclusive: None,
+            reverse: false,
             marker: PhantomData,
         }
+    }
+
+    pub fn seek(&self, key: &K) -> Result<CollectionIter<'b, 'tx, K, V, C>, CodecError> {
+        if !C::ORDER_PRESERVING {
+            return Err(CodecError::OrderingRequired);
+        }
+        let key = self.codec.encode_key(key)?;
+        Ok(self.iter_from_encoded(&key, false))
+    }
+
+    /// Returns a bounded page. `after` is exclusive and can be passed from the
+    /// prior page without decoding or retaining database-backed memory.
+    pub fn page_after(
+        &self,
+        after: Option<&PageToken>,
+        limit: usize,
+    ) -> Result<ScanPage<K, V>, CodecError> {
+        if !C::ORDER_PRESERVING {
+            return Err(CodecError::OrderingRequired);
+        }
+        if limit == 0 {
+            return Ok(ScanPage {
+                items: Vec::new(),
+                next: None,
+            });
+        }
+        let mut iter = match after {
+            Some(token) => self.iter_from_encoded(token.as_bytes(), true),
+            None => self.iter(),
+        };
+        let mut items = Vec::with_capacity(limit);
+        for _ in 0..limit {
+            let Some(item) = iter.next() else { break };
+            items.push(item?);
+        }
+        let has_more = iter.next().transpose()?.is_some();
+        let next = if has_more {
+            items
+                .last()
+                .map(|(key, _)| self.codec.encode_key(key).map(PageToken))
+                .transpose()?
+        } else {
+            None
+        };
+        Ok(ScanPage { items, next })
     }
 
     pub fn range(
@@ -112,6 +174,7 @@ where
             remaining: None,
             prefix: None,
             end_exclusive: Some(end_exclusive),
+            reverse: false,
             marker: PhantomData,
         })
     }
@@ -121,7 +184,7 @@ where
     }
 
     pub fn last(&self) -> Result<Option<(K, V)>, CodecError> {
-        self.iter().last().transpose()
+        self.iter_rev().next().transpose()
     }
 
     pub fn len(&self) -> usize {
@@ -130,6 +193,24 @@ where
 
     pub fn is_empty(&self) -> bool {
         self.raw.kv_pairs().next().is_none()
+    }
+
+    fn iter_from_encoded(&self, key: &[u8], exclusive: bool) -> CollectionIter<'b, 'tx, K, V, C> {
+        let mut cursor = self.raw.cursor();
+        let exists = cursor.seek(key);
+        if exclusive && exists {
+            cursor.next();
+        }
+        CollectionIter {
+            cursor,
+            raw: self.raw.clone_handle(),
+            codec: self.codec.clone(),
+            remaining: None,
+            prefix: None,
+            end_exclusive: None,
+            reverse: false,
+            marker: PhantomData,
+        }
     }
 }
 
@@ -156,6 +237,10 @@ where
 
     pub fn iter(&self) -> CollectionIter<'b, 'tx, K, V, C> {
         self.read.iter()
+    }
+
+    pub fn iter_rev(&self) -> CollectionIter<'b, 'tx, K, V, C> {
+        self.read.iter_rev()
     }
 
     pub fn insert(&self, key: &K, value: &V) -> Result<Option<V>, CodecError> {

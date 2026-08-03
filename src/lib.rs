@@ -128,7 +128,7 @@ mod typed;
 mod application;
 
 pub use bucket::{AtomicResult, Bucket};
-pub use changes::{Change, ChangeOperation, ChangeSet, WatchSubscription};
+pub use changes::{Change, ChangeOperation, ChangeSet, WatchFilter, WatchSubscription};
 pub use cursor::{Buckets, Cursor, KVPairs, ToBuckets, ToKVPairs};
 pub use data::*;
 pub use db::{DB, OpenOptions};

@@ -19,6 +19,13 @@ const USERS: CollectionDef<u64, String, TypedCodec<U64Codec, StringCodec>> =
 const COUNTERS: CollectionDef<u64, u64, TypedCodec<U64Codec, U64Codec>> =
     CollectionDef::new("counters", TypedCodec::new(U64Codec, U64Codec));
 
+const AUDIT: CollectionDef<u64, String, TypedCodec<U64Codec, StringCodec>> = CollectionDef::nested(
+    &["tenant", "application"],
+    "audit",
+    TypedCodec::new(U64Codec, StringCodec),
+)
+.schema("example.audit", 1);
+
 #[test]
 fn reusable_collection_supports_typed_crud_and_bounded_scans()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -51,6 +58,15 @@ fn reusable_collection_supports_typed_crud_and_bounded_scans()
             users.range(&2, &4)?.collect::<Result<Vec<_>, _>>()?,
             vec![(2, "Hopper".into()), (3, "Linus".into())]
         );
+        assert_eq!(
+            users.iter_rev().collect::<Result<Vec<_>, _>>()?,
+            vec![(3, "Linus".into()), (2, "Hopper".into()), (1, "Ada".into())]
+        );
+        let first_page = users.page_after(None, 2)?;
+        assert_eq!(first_page.items.len(), 2);
+        let second_page = users.page_after(first_page.next.as_ref(), 2)?;
+        assert_eq!(second_page.items, vec![(3, "Linus".into())]);
+        assert!(second_page.next.is_none());
         Ok::<_, TransactionError<CodecError>>(())
     })?;
 
@@ -186,7 +202,26 @@ fn typed_collection_matches_btree_map_for_random_mutations()
             }
         }
         let actual = collection.iter().collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(actual, model.into_iter().collect::<Vec<_>>());
+        assert_eq!(actual, model.clone().into_iter().collect::<Vec<_>>());
+        assert_eq!(
+            collection.iter_rev().collect::<Result<Vec<_>, _>>()?,
+            model.into_iter().rev().collect::<Vec<_>>()
+        );
+        Ok::<_, TransactionError<CodecError>>(())
+    })?;
+    Ok(())
+}
+
+#[test]
+fn collection_definitions_support_stable_nested_paths() -> Result<(), Box<dyn std::error::Error>> {
+    let file = common::RandomFile::new();
+    let db = DB::open(&file)?;
+    db.write(|tx| {
+        tx.collection_mut(AUDIT)?.insert(&1, &"created".into())?;
+        Ok::<_, TransactionError<CodecError>>(())
+    })?;
+    db.read(|tx| {
+        assert_eq!(tx.collection(AUDIT)?.get(&1)?, Some("created".into()));
         Ok::<_, TransactionError<CodecError>>(())
     })?;
     Ok(())

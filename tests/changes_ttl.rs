@@ -3,7 +3,7 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
-use inspace::{ChangeOperation, DB, Error};
+use inspace::{ChangeOperation, DB, Error, WatchFilter};
 
 mod common;
 
@@ -34,6 +34,36 @@ fn watches_deliver_ordered_committed_change_sets() -> Result<(), Error> {
         vec![b"root".to_vec(), b"nested".to_vec()]
     );
     assert_eq!(set.changes[3].key, b"second");
+    Ok(())
+}
+
+#[test]
+fn filtered_watches_keep_transaction_boundaries_and_select_changes() -> Result<(), Error> {
+    let file = common::RandomFile::new();
+    let db = DB::open(&file)?;
+    db.update(|tx| {
+        tx.create_bucket("users")?;
+        tx.create_bucket("jobs")?;
+        Ok(())
+    })?;
+    let watch = db.watch_filtered(
+        2,
+        WatchFilter::new()
+            .collection("users")
+            .prefix("active/")
+            .operations([ChangeOperation::Put]),
+    )?;
+    db.update(|tx| {
+        tx.get_bucket("users")?.put("active/1", "Ada")?;
+        tx.get_bucket("users")?.put("inactive/2", "Grace")?;
+        tx.get_bucket("jobs")?.put("active/3", "Linus")?;
+        Ok(())
+    })?;
+
+    let set = watch.recv().unwrap();
+    assert_eq!(set.changes.len(), 1);
+    assert_eq!(set.changes[0].bucket_path, vec![b"users".to_vec()]);
+    assert_eq!(set.changes[0].key, b"active/1");
     Ok(())
 }
 

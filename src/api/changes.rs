@@ -38,6 +38,64 @@ pub struct WatchSubscription {
     receiver: mpsc::Receiver<ChangeSet>,
 }
 
+/// Best-effort process-local watch selection.
+#[derive(Clone, Debug, Default)]
+pub struct WatchFilter {
+    bucket_path: Option<Vec<Vec<u8>>>,
+    key_prefix: Option<Vec<u8>>,
+    operations: Vec<ChangeOperation>,
+}
+
+impl WatchFilter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn collection(mut self, name: impl AsRef<[u8]>) -> Self {
+        self.bucket_path = Some(vec![name.as_ref().to_vec()]);
+        self
+    }
+
+    pub fn bucket_path<I, B>(mut self, path: I) -> Self
+    where
+        I: IntoIterator<Item = B>,
+        B: AsRef<[u8]>,
+    {
+        self.bucket_path = Some(
+            path.into_iter()
+                .map(|part| part.as_ref().to_vec())
+                .collect(),
+        );
+        self
+    }
+
+    pub fn prefix(mut self, prefix: impl AsRef<[u8]>) -> Self {
+        self.key_prefix = Some(prefix.as_ref().to_vec());
+        self
+    }
+
+    pub fn operations(mut self, operations: impl IntoIterator<Item = ChangeOperation>) -> Self {
+        self.operations = operations.into_iter().collect();
+        self
+    }
+
+    fn matches(&self, change: &Change) -> bool {
+        self.bucket_path
+            .as_ref()
+            .is_none_or(|path| path == &change.bucket_path)
+            && self
+                .key_prefix
+                .as_ref()
+                .is_none_or(|prefix| change.key.starts_with(prefix))
+            && (self.operations.is_empty() || self.operations.contains(&change.operation))
+    }
+}
+
+struct WatchSender {
+    sender: mpsc::SyncSender<ChangeSet>,
+    filter: WatchFilter,
+}
+
 impl WatchSubscription {
     pub fn recv(&self) -> std::result::Result<ChangeSet, mpsc::RecvError> {
         self.receiver.recv()
@@ -49,7 +107,7 @@ impl WatchSubscription {
 }
 
 pub(crate) struct WatchHub {
-    senders: Mutex<Vec<mpsc::SyncSender<ChangeSet>>>,
+    senders: Mutex<Vec<WatchSender>>,
 }
 
 impl WatchHub {
@@ -59,9 +117,9 @@ impl WatchHub {
         }
     }
 
-    fn subscribe(&self, capacity: usize) -> Result<WatchSubscription> {
+    fn subscribe(&self, capacity: usize, filter: WatchFilter) -> Result<WatchSubscription> {
         let (sender, receiver) = mpsc::sync_channel(capacity.max(1));
-        self.senders.lock()?.push(sender);
+        self.senders.lock()?.push(WatchSender { sender, filter });
         Ok(WatchSubscription { receiver })
     }
 
@@ -69,7 +127,25 @@ impl WatchHub {
         let Ok(mut senders) = self.senders.lock() else {
             return;
         };
-        senders.retain(|sender| sender.try_send(changes.clone()).is_ok());
+        senders.retain(|subscription| {
+            let selected = changes
+                .changes
+                .iter()
+                .filter(|change| subscription.filter.matches(change))
+                .cloned()
+                .collect::<Vec<_>>();
+            if selected.is_empty() && !changes.truncated {
+                return true;
+            }
+            subscription
+                .sender
+                .try_send(ChangeSet {
+                    transaction_id: changes.transaction_id,
+                    changes: selected,
+                    truncated: changes.truncated,
+                })
+                .is_ok()
+        });
     }
 }
 
@@ -126,6 +202,17 @@ impl DB {
     /// A slow consumer is disconnected when its bounded queue fills. There is
     /// no durable replay; use transaction IDs to detect application-level gaps.
     pub fn watch(&self, capacity: usize) -> Result<WatchSubscription> {
-        self.inner.watches.subscribe(capacity)
+        self.inner
+            .watches
+            .subscribe(capacity, WatchFilter::default())
+    }
+
+    /// Subscribes to committed changes selected by `filter`.
+    pub fn watch_filtered(
+        &self,
+        capacity: usize,
+        filter: WatchFilter,
+    ) -> Result<WatchSubscription> {
+        self.inner.watches.subscribe(capacity, filter)
     }
 }
