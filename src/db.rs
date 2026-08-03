@@ -37,6 +37,7 @@ struct State {
     mmap: Mmap,
     buckets: HashMap<u64, Vec<Slice>>,
     entries: HashMap<u64, Vec<Entry>>,
+    next_ints: HashMap<Vec<u8>, u64>,
     txid: u64,
     valid_len: usize,
 }
@@ -72,6 +73,7 @@ impl Database {
             mmap,
             buckets: HashMap::new(),
             entries: HashMap::new(),
+            next_ints: HashMap::new(),
             txid: 0,
             valid_len: FILE_HEADER_LEN,
         };
@@ -86,6 +88,7 @@ impl Database {
                 mmap,
                 buckets: HashMap::new(),
                 entries: HashMap::new(),
+                next_ints: HashMap::new(),
                 txid: 0,
                 valid_len: FILE_HEADER_LEN,
             };
@@ -146,6 +149,31 @@ impl Database {
     /// Returns the last committed transaction identifier.
     pub fn transaction_id(&self) -> u64 {
         self.read_state().txid
+    }
+
+    pub fn check(&self) -> Result<()> {
+        let state = self.read_state();
+        let mmap = map(&self.inner.file)?;
+        validate_file_header(&mmap)?;
+        let mut checked = State {
+            mmap,
+            buckets: HashMap::new(),
+            entries: HashMap::new(),
+            next_ints: HashMap::new(),
+            txid: 0,
+            valid_len: FILE_HEADER_LEN,
+        };
+        recover(&mut checked)?;
+        if checked.valid_len != checked.mmap.len()
+            || checked.txid != state.txid
+            || checked.buckets.values().map(Vec::len).sum::<usize>()
+                != state.buckets.values().map(Vec::len).sum::<usize>()
+            || checked.entries.values().map(Vec::len).sum::<usize>()
+                != state.entries.values().map(Vec::len).sum::<usize>()
+        {
+            return Err(Error::Corrupt("state does not match committed data"));
+        }
+        Ok(())
     }
 
     fn read_state(&self) -> RwLockReadGuard<'_, State> {
@@ -277,6 +305,10 @@ impl<'tx> Bucket<'tx> {
             .collect();
         Range::new(items)
     }
+
+    pub fn next_int(&self) -> u64 {
+        self.state.next_ints.get(&self.path).copied().unwrap_or(0)
+    }
 }
 
 impl<'tx> IntoIterator for Bucket<'tx> {
@@ -324,6 +356,16 @@ impl<'db> WriteTransaction<'db> {
         let path = root_path(name.as_ref())?;
         if !self.bucket_will_exist(&path) {
             return Err(Error::BucketNotFound);
+        }
+        Ok(WriteBucket { tx: self, path })
+    }
+
+    pub fn get_or_create_bucket(&mut self, name: impl AsRef<[u8]>) -> Result<WriteBucket<'_, 'db>> {
+        let path = root_path(name.as_ref())?;
+        if !self.bucket_will_exist(&path) {
+            self.operations
+                .push((CREATE_BUCKET, path.clone(), Vec::new(), Vec::new()));
+            self.bucket_changes.insert(path.clone(), true);
         }
         Ok(WriteBucket { tx: self, path })
     }
@@ -391,6 +433,35 @@ impl<'db> WriteTransaction<'db> {
         }
         find_entry(self.state, bucket, key).is_some()
     }
+
+    fn staged_next_int(&self, bucket: &[u8]) -> u64 {
+        let reset = self
+            .operations
+            .iter()
+            .rposition(|(kind, path, _, _)| *kind == CREATE_BUCKET && path == bucket);
+        let mut next = if reset.is_some() {
+            0
+        } else {
+            self.state.next_ints.get(bucket).copied().unwrap_or(0)
+        };
+        let mut keys = HashMap::<Vec<u8>, bool>::new();
+        let start = reset.map_or(0, |index| index + 1);
+        for (kind, path, key, _) in &self.operations[start..] {
+            if *kind == CREATE_BUCKET && parent_path(path) == Some(bucket) {
+                next = next.saturating_add(1);
+            } else if path == bucket && matches!(*kind, PUT | DELETE) {
+                let exists = keys
+                    .get(key.as_slice())
+                    .copied()
+                    .unwrap_or_else(|| find_entry(self.state, bucket, key).is_some());
+                if *kind == PUT && !exists {
+                    next = next.saturating_add(1);
+                }
+                keys.insert(key.clone(), *kind == PUT);
+            }
+        }
+        next
+    }
 }
 
 pub struct WriteBucket<'tx, 'db> {
@@ -399,6 +470,10 @@ pub struct WriteBucket<'tx, 'db> {
 }
 
 impl<'tx, 'db> WriteBucket<'tx, 'db> {
+    pub fn next_int(&self) -> u64 {
+        self.tx.staged_next_int(&self.path)
+    }
+
     pub fn put(&mut self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<()> {
         let key = key.as_ref();
         if self.tx.bucket_will_exist(&child_path(&self.path, key)?) {
@@ -520,16 +595,59 @@ fn apply_records(state: &mut State, records: &[Record]) -> Result<()> {
             len: record.value_len,
         };
         match record.kind {
-            CREATE_BUCKET => insert_bucket(state, bucket),
+            CREATE_BUCKET => {
+                let path = bucket.get(&state.mmap).to_vec();
+                if bucket_exists(state, &path) {
+                    return Err(Error::Corrupt("bucket created twice"));
+                }
+                let parent = parent_path(&path).ok_or(Error::Corrupt("invalid bucket path"))?;
+                let name = path_name(&path).ok_or(Error::Corrupt("invalid bucket path"))?;
+                if !parent.is_empty() {
+                    if !bucket_exists(state, parent) {
+                        return Err(Error::Corrupt("bucket parent is missing"));
+                    }
+                    if find_entry(state, parent, name).is_some() {
+                        return Err(Error::Corrupt("bucket conflicts with key"));
+                    }
+                    *state.next_ints.entry(parent.to_vec()).or_default() += 1;
+                }
+                insert_bucket(state, bucket);
+                state.next_ints.insert(path, 0);
+            }
             DELETE_BUCKET => {
                 let bucket_bytes = bucket.get(&state.mmap).to_vec();
+                if !bucket_exists(state, &bucket_bytes) {
+                    return Err(Error::Corrupt("deleted bucket is missing"));
+                }
                 remove_bucket(state, &bucket_bytes);
                 remove_bucket_entries(state, &bucket_bytes);
+                state
+                    .next_ints
+                    .retain(|path, _| !path.starts_with(&bucket_bytes));
             }
-            PUT => insert_entry(state, Entry { bucket, key, value }),
+            PUT => {
+                let bucket_bytes = bucket.get(&state.mmap).to_vec();
+                let key_bytes = key.get(&state.mmap);
+                if !bucket_exists(state, &bucket_bytes) {
+                    return Err(Error::Corrupt("key bucket is missing"));
+                }
+                let child = child_path(&bucket_bytes, key_bytes)?;
+                if bucket_exists(state, &child) {
+                    return Err(Error::Corrupt("key conflicts with bucket"));
+                }
+                if find_entry(state, &bucket_bytes, key_bytes).is_none() {
+                    *state.next_ints.entry(bucket_bytes).or_default() += 1;
+                }
+                insert_entry(state, Entry { bucket, key, value });
+            }
             DELETE => {
                 let bucket_bytes = bucket.get(&state.mmap).to_vec();
                 let key_bytes = key.get(&state.mmap).to_vec();
+                if !bucket_exists(state, &bucket_bytes)
+                    || find_entry(state, &bucket_bytes, &key_bytes).is_none()
+                {
+                    return Err(Error::Corrupt("deleted key is missing"));
+                }
                 remove_entry(state, &bucket_bytes, &key_bytes);
             }
             _ => return Err(Error::Corrupt("unknown record kind")),
@@ -632,6 +750,21 @@ fn path_name(path: &[u8]) -> Option<&[u8]> {
         cursor = end;
     }
     name
+}
+
+fn parent_path(path: &[u8]) -> Option<&[u8]> {
+    let mut cursor = 0;
+    let mut previous = 0;
+    while cursor < path.len() {
+        previous = cursor;
+        let end = cursor.checked_add(4)?;
+        let len = u32::from_le_bytes(path.get(cursor..end)?.try_into().ok()?) as usize;
+        cursor = end.checked_add(len)?;
+        if cursor > path.len() {
+            return None;
+        }
+    }
+    (cursor == path.len()).then_some(&path[..previous])
 }
 
 fn direct_child_name<'a>(path: &'a [u8], parent: &[u8]) -> Option<&'a [u8]> {

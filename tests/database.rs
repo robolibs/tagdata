@@ -48,6 +48,7 @@ fn persists_zero_copy_values_across_reopen() -> Result<()> {
     }
     let reopened = Database::open(&file.0)?;
     assert_eq!(reopened.transaction_id(), 1);
+    reopened.check()?;
     reopened.view(|tx| {
         assert_eq!(
             tx.bucket(b"users")?.get_kv(b"one").map(|pair| pair.value()),

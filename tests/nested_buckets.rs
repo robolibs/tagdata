@@ -106,3 +106,31 @@ fn keys_and_child_buckets_cannot_share_a_name() -> Result<()> {
         Ok(())
     })
 }
+
+#[test]
+fn next_int_tracks_new_entries_and_survives_reopen() -> Result<()> {
+    let file = TestFile::new();
+    {
+        let db = Database::open(&file.0)?;
+        db.update(|tx| {
+            let mut root = tx.create_bucket("root")?;
+            assert_eq!(root.next_int(), 0);
+            root.put(0_u64.to_be_bytes(), "zero")?;
+            assert_eq!(root.next_int(), 1);
+            root.put(0_u64.to_be_bytes(), "updated")?;
+            assert_eq!(root.next_int(), 1);
+            root.create_bucket("child")?;
+            assert_eq!(root.next_int(), 2);
+            root.delete(0_u64.to_be_bytes())?;
+            root.put(0_u64.to_be_bytes(), "again")?;
+            assert_eq!(root.next_int(), 3);
+            Ok(())
+        })?;
+    }
+
+    let db = Database::open(&file.0)?;
+    db.view(|tx| {
+        assert_eq!(tx.bucket(b"root")?.next_int(), 3);
+        Ok(())
+    })
+}
