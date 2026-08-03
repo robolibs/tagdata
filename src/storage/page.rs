@@ -10,6 +10,7 @@ use sha3::{Digest, Sha3_256};
 
 use crate::{
     errors::{Error, Result},
+    freelist::RetiredPage,
     meta::{Meta, OldMeta},
     node::{Node, NodeData, NodeType},
 };
@@ -132,18 +133,26 @@ impl Page {
         if checksum_size > 0 {
             verify_checksum(&buf[offset..block_end], id)?;
         }
-        page.validate_layout(block_len - checksum_size)?;
+        page.validate_layout(block_len - checksum_size, version)?;
         Ok(page)
     }
 
-    fn validate_layout(&self, data_limit: usize) -> Result<()> {
+    fn validate_layout(&self, data_limit: usize, version: u32) -> Result<()> {
         let data_offset = std::mem::offset_of!(Page, ptr);
         match self.page_type {
             Self::TYPE_META => ensure_end(self.id, data_offset, size_of::<Meta>(), data_limit),
             Self::TYPE_FREELIST => ensure_end(
                 self.id,
                 data_offset,
-                checked_size(self.id, self.count, size_of::<PageID>())?,
+                checked_size(
+                    self.id,
+                    self.count,
+                    if version >= crate::freelist::RETIREMENT_FORMAT_VERSION {
+                        size_of::<RetiredPage>()
+                    } else {
+                        size_of::<PageID>()
+                    },
+                )?,
                 data_limit,
             ),
             Self::TYPE_BRANCH => {
@@ -239,6 +248,22 @@ impl Page {
         );
         unsafe {
             let start = &self.ptr as *const u64 as *mut PageID;
+            from_raw_parts_mut(start, self.count as usize)
+        }
+    }
+
+    pub(crate) fn retired_pages(&self) -> &[RetiredPage] {
+        assert_eq!(self.page_type, Page::TYPE_FREELIST);
+        unsafe {
+            let start = &self.ptr as *const u64 as *const RetiredPage;
+            from_raw_parts(start, self.count as usize)
+        }
+    }
+
+    pub(crate) fn retired_pages_mut(&mut self) -> &mut [RetiredPage] {
+        assert_eq!(self.page_type, Page::TYPE_FREELIST);
+        unsafe {
+            let start = &self.ptr as *const u64 as *mut RetiredPage;
             from_raw_parts_mut(start, self.count as usize)
         }
     }

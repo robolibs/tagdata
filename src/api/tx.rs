@@ -216,7 +216,9 @@ impl<'tx> Tx<'tx> {
             let mut meta = db.inner.meta()?;
             debug_assert!(meta.valid());
             meta.tx_id += 1;
-            if oldest_reader.is_some() {
+            if meta.version >= crate::freelist::RETIREMENT_FORMAT_VERSION {
+                freelist.release(oldest_reader.unwrap_or(meta.tx_id));
+            } else if oldest_reader.is_some() {
                 freelist.defer_all(meta.tx_id);
             } else {
                 freelist.release(meta.tx_id);
@@ -442,14 +444,19 @@ impl<'tx> TxInner<'tx> {
             // Write the freelist to a new page
             {
                 freelist.free(self.meta.freelist_page, self.num_freelist_pages);
-                let freelist_size = freelist.inner.size();
+                let freelist_size = freelist.inner.size(self.meta.version);
                 let page = freelist.allocate(freelist_size)?;
                 self.meta.freelist_page = page.id;
-                let free_page_ids = freelist.inner.pages();
                 page.page_type = Page::TYPE_FREELIST;
-                page.count = free_page_ids.len() as u64;
-                page.freelist_mut()
-                    .copy_from_slice(free_page_ids.as_slice());
+                if self.meta.version >= crate::freelist::RETIREMENT_FORMAT_VERSION {
+                    let entries = freelist.inner.entries();
+                    page.count = entries.len() as u64;
+                    page.retired_pages_mut().copy_from_slice(&entries);
+                } else {
+                    let page_ids = freelist.inner.pages();
+                    page.count = page_ids.len() as u64;
+                    page.freelist_mut().copy_from_slice(&page_ids);
+                }
             }
 
             // Update our num_pages from the freelist now that we've allocated everything
@@ -644,8 +651,27 @@ impl<'tx> TxInner<'tx> {
                         )));
                     }
                     // "visit" all freelist pages (we don't actually care what data is in these pages)
-                    for page_id in page.freelist() {
-                        if !unused_pages.remove(page_id) {
+                    let free_pages =
+                        if self.meta.version >= crate::freelist::RETIREMENT_FORMAT_VERSION {
+                            let entries = page.retired_pages();
+                            if let Some(entry) = entries
+                                .iter()
+                                .find(|entry| entry.retired_tx_id > self.meta.tx_id)
+                            {
+                                return Err(Error::InvalidDB(format!(
+                                    "Page {} has future retirement transaction {}",
+                                    entry.page_id, entry.retired_tx_id
+                                )));
+                            }
+                            entries
+                                .iter()
+                                .map(|entry| entry.page_id)
+                                .collect::<Vec<_>>()
+                        } else {
+                            page.freelist().to_vec()
+                        };
+                    for page_id in free_pages {
+                        if !unused_pages.remove(&page_id) {
                             return Err(Error::InvalidDB(format!(
                                 "Page {} from freelist missing from unused_pages",
                                 page_id,

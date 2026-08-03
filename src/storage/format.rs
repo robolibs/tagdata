@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
     Error, Result,
-    db::{MAGIC_VALUE, VERSION},
+    db::{LATEST_FORMAT_VERSION, MAGIC_VALUE},
     meta::Meta,
     page::Page,
 };
@@ -107,7 +107,7 @@ fn inspect_candidate(file: &mut File, file_bytes: u64, page_size: u64) -> Result
         let current = page.meta();
         if current.valid()
             && current.magic == MAGIC_VALUE
-            && (1..=VERSION).contains(&current.version)
+            && (1..=LATEST_FORMAT_VERSION).contains(&current.version)
             && current.pagesize == page_size
             && Page::validate_block(&bytes, id, page_size, current.version).is_ok()
         {
@@ -117,7 +117,7 @@ fn inspect_candidate(file: &mut File, file_bytes: u64, page_size: u64) -> Result
         let old = page.old_meta();
         if old.valid()
             && old.magic == MAGIC_VALUE
-            && (1..=VERSION).contains(&old.version)
+            && (1..=LATEST_FORMAT_VERSION).contains(&old.version)
             && old.pagesize == page_size
         {
             valid.push(old.into());

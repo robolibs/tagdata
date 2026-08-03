@@ -28,7 +28,8 @@ use crate::{
 };
 
 pub(crate) const MAGIC_VALUE: u32 = 0x00AB_CDEF;
-pub(crate) const VERSION: u32 = 2;
+pub const DEFAULT_FORMAT_VERSION: u32 = 2;
+pub const LATEST_FORMAT_VERSION: u32 = 3;
 
 // Minimum number of bytes to allocate when growing the databse
 pub(crate) const MIN_ALLOC_SIZE: u64 = 8 * 1024 * 1024;
@@ -60,6 +61,7 @@ const DEFAULT_NUM_PAGES: usize = 32;
 pub struct OpenOptions {
     pagesize: Option<u64>,
     num_pages: usize,
+    format_version: Option<u32>,
     max_file_bytes: Option<u64>,
     growth_increment: u64,
     flags: DBFlags,
@@ -116,6 +118,19 @@ impl OpenOptions {
             panic!("Must have a minimum of 4 pages");
         }
         self.num_pages = num_pages;
+        self
+    }
+
+    /// Selects the on-disk format for a newly created database.
+    ///
+    /// Format 3 persists page retirement generations for precise reclamation.
+    /// Existing databases always retain their detected format.
+    pub fn format_version(mut self, version: u32) -> Self {
+        assert!(
+            (1..=LATEST_FORMAT_VERSION).contains(&version),
+            "Unsupported format version"
+        );
+        self.format_version = Some(version);
         self
     }
 
@@ -212,7 +227,13 @@ impl OpenOptions {
         let file = if self.flags.read_only {
             open_file(path, false, false, true)?
         } else if !exists {
-            init_file(path, pagesize, self.num_pages, self.flags.direct_writes)?
+            init_file_version(
+                path,
+                pagesize,
+                self.num_pages,
+                self.flags.direct_writes,
+                self.format_version.unwrap_or(DEFAULT_FORMAT_VERSION),
+            )?
         } else {
             open_file(path, false, self.flags.direct_writes, false)?
         };
@@ -251,6 +272,7 @@ impl Default for OpenOptions {
         OpenOptions {
             pagesize: None,
             num_pages: DEFAULT_NUM_PAGES,
+            format_version: None,
             max_file_bytes: None,
             growth_increment: MIN_ALLOC_SIZE,
             flags: DBFlags {
@@ -483,12 +505,8 @@ impl DBInner {
         {
             let meta = db.meta()?;
             let data = db.data.lock()?;
-            let free_pages =
-                Page::validate_block(&data, meta.freelist_page, pagesize, meta.version)?.freelist();
-
-            if !free_pages.is_empty() {
-                db.freelist.lock()?.init(free_pages);
-            }
+            let page = Page::validate_block(&data, meta.freelist_page, pagesize, meta.version)?;
+            db.freelist.lock()?.init_page(page, meta.version);
         }
 
         Ok(db)
@@ -514,11 +532,9 @@ impl DBInner {
     pub(crate) fn reload_freelist(&self) -> Result<()> {
         let meta = self.meta()?;
         let data = self.data.lock()?;
-        let free_pages =
-            Page::validate_block(&data, meta.freelist_page, self.pagesize, meta.version)?
-                .freelist();
+        let page = Page::validate_block(&data, meta.freelist_page, self.pagesize, meta.version)?;
         let mut freelist = Freelist::new();
-        freelist.init(free_pages);
+        freelist.init_page(page, meta.version);
         *self.freelist.lock()? = freelist;
         Ok(())
     }
@@ -537,14 +553,14 @@ impl DBInner {
                 let valid1 = meta1.is_some_and(|meta| {
                     meta.valid()
                         && meta.magic == MAGIC_VALUE
-                        && (1..=VERSION).contains(&meta.version)
+                        && (1..=LATEST_FORMAT_VERSION).contains(&meta.version)
                         && meta.pagesize == self.pagesize
                         && Page::validate_block(&data, 0, self.pagesize, meta.version).is_ok()
                 });
                 let valid2 = meta2.is_some_and(|meta| {
                     meta.valid()
                         && meta.magic == MAGIC_VALUE
-                        && (1..=VERSION).contains(&meta.version)
+                        && (1..=LATEST_FORMAT_VERSION).contains(&meta.version)
                         && meta.pagesize == self.pagesize
                         && Page::validate_block(&data, 1, self.pagesize, meta.version).is_ok()
                 });
@@ -573,10 +589,6 @@ impl DBInner {
             Err(Error::InvalidDB("no valid metadata pages".into()))
         }
     }
-}
-
-fn init_file(path: &Path, pagesize: u64, num_pages: usize, direct_write: bool) -> Result<File> {
-    init_file_version(path, pagesize, num_pages, direct_write, VERSION)
 }
 
 fn init_file_version(
@@ -634,93 +646,8 @@ fn init_file_version(
 }
 
 #[cfg(test)]
-#[allow(clippy::items_after_test_module)]
-mod tests {
-    use super::*;
-    use crate::testutil::RandomFile;
-
-    #[test]
-    fn test_open_options() {
-        assert_ne!(get_page_size(), 5000);
-        let random_file = RandomFile::new();
-        {
-            let db = OpenOptions::new()
-                .pagesize(5000)
-                .num_pages(100)
-                .open(&random_file)
-                .unwrap();
-            assert_eq!(db.pagesize(), 5000);
-        }
-        {
-            let metadata = random_file.path.metadata().unwrap();
-            assert!(metadata.is_file());
-            assert_eq!(metadata.len(), 500_000);
-        }
-        {
-            let db = OpenOptions::new()
-                .pagesize(5000)
-                .num_pages(100)
-                .open(&random_file)
-                .unwrap();
-            assert_eq!(db.pagesize(), 5000);
-        }
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_open_options_min_pages() {
-        OpenOptions::new().num_pages(3);
-    }
-
-    #[test]
-    #[should_panic]
-    fn test_open_options_min_pagesize() {
-        OpenOptions::new().pagesize(1000);
-    }
-
-    #[test]
-    fn test_different_pagesizes_are_detected() {
-        assert_ne!(get_page_size(), 5000);
-        let random_file = RandomFile::new();
-        {
-            let db = OpenOptions::new()
-                .pagesize(5000)
-                .num_pages(100)
-                .open(&random_file)
-                .unwrap();
-            assert_eq!(db.pagesize(), 5000);
-        }
-        assert_eq!(DB::open(&random_file).unwrap().pagesize(), 5000);
-    }
-
-    #[test]
-    fn opens_and_migrates_version_one_databases() -> Result<()> {
-        let source = RandomFile::new();
-        let destination = RandomFile::new();
-        drop(init_file_version(&source.path, 4096, 32, false, 1)?);
-
-        let db = OpenOptions::new().pagesize(4096).open(&source)?;
-        assert_eq!(db.inner.meta()?.version, 1);
-        let tx = db.tx(true)?;
-        tx.create_bucket("legacy")?.put("key", "value")?;
-        tx.commit()?;
-        db.verify()?;
-
-        db.compact_to(&destination.path)?;
-        let migrated = OpenOptions::new().pagesize(4096).open(&destination)?;
-        assert_eq!(migrated.inner.meta()?.version, VERSION);
-        assert_eq!(
-            migrated
-                .tx(false)?
-                .get_bucket("legacy")?
-                .get_kv("key")
-                .unwrap()
-                .value(),
-            b"value"
-        );
-        migrated.verify()
-    }
-}
+#[path = "db_tests.rs"]
+mod tests;
 
 // Have different mmap functions for Unix and Windows
 #[cfg(unix)]

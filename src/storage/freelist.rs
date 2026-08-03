@@ -13,6 +13,15 @@ use crate::{
     page::{Page, PageID, checksum_size},
 };
 
+pub(crate) const RETIREMENT_FORMAT_VERSION: u32 = 3;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RetiredPage {
+    pub(crate) page_id: PageID,
+    pub(crate) retired_tx_id: u64,
+}
+
 pub(crate) struct TxFreelist {
     pub(crate) meta: Meta,
     pub(crate) inner: Freelist,
@@ -114,10 +123,33 @@ impl Freelist {
         pages.extend(std::mem::take(&mut self.free_pages));
     }
 
-    pub(crate) fn init(&mut self, free_pages: &[PageID]) {
-        free_pages.iter().for_each(|id| {
-            self.free_pages.insert(*id);
-        });
+    pub(crate) fn init(&mut self, entries: &[RetiredPage]) {
+        for entry in entries {
+            if entry.retired_tx_id == 0 {
+                self.free_pages.insert(entry.page_id);
+            } else {
+                self.pending_pages
+                    .entry(entry.retired_tx_id)
+                    .or_default()
+                    .push(entry.page_id);
+            }
+        }
+    }
+
+    pub(crate) fn init_page(&mut self, page: &Page, version: u32) {
+        if version >= RETIREMENT_FORMAT_VERSION {
+            self.init(page.retired_pages());
+        } else {
+            let entries = page
+                .freelist()
+                .iter()
+                .map(|page_id| RetiredPage {
+                    page_id: *page_id,
+                    retired_tx_id: 0,
+                })
+                .collect::<Vec<_>>();
+            self.init(&entries);
+        }
     }
 
     // adds the page to the transaction's set of free pages
@@ -194,9 +226,33 @@ impl Freelist {
         page_ids
     }
 
-    pub(crate) fn size(&self) -> u64 {
+    pub(crate) fn entries(&self) -> Vec<RetiredPage> {
+        let mut entries = self
+            .free_pages
+            .iter()
+            .map(|page_id| RetiredPage {
+                page_id: *page_id,
+                retired_tx_id: 0,
+            })
+            .chain(self.pending_pages.iter().flat_map(|(tx_id, pages)| {
+                pages.iter().map(|page_id| RetiredPage {
+                    page_id: *page_id,
+                    retired_tx_id: *tx_id,
+                })
+            }))
+            .collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|entry| entry.page_id);
+        entries
+    }
+
+    pub(crate) fn size(&self, version: u32) -> u64 {
         let count = self.pages().len() as u64;
-        HEADER_SIZE + (PAGE_ID_SIZE * count)
+        let entry_size = if version >= RETIREMENT_FORMAT_VERSION {
+            size_of::<RetiredPage>() as u64
+        } else {
+            PAGE_ID_SIZE
+        };
+        HEADER_SIZE + (entry_size * count)
     }
 }
 
@@ -210,7 +266,14 @@ mod tests {
             free_pages: v.iter().cloned().collect(),
             pending_pages: BTreeMap::new(),
         };
-        freelist.init(v.as_slice());
+        let entries = v
+            .into_iter()
+            .map(|page_id| RetiredPage {
+                page_id,
+                retired_tx_id: 0,
+            })
+            .collect::<Vec<_>>();
+        freelist.init(&entries);
         freelist
     }
 
@@ -300,7 +363,25 @@ mod tests {
     #[test]
     fn test_size() {
         let freelist = freelist_from_vec(vec![1, 2, 3]);
-        assert_eq!(freelist.size(), HEADER_SIZE + (PAGE_ID_SIZE * 3));
+        assert_eq!(freelist.size(2), HEADER_SIZE + (PAGE_ID_SIZE * 3));
+        assert_eq!(freelist.size(3), HEADER_SIZE + (16 * 3));
+    }
+
+    #[test]
+    fn retirement_generations_round_trip_and_release_before_oldest_reader() {
+        let mut freelist = Freelist::new();
+        freelist.free(4, 10);
+        freelist.free(7, 11);
+        let entries = freelist.entries();
+
+        let mut restored = Freelist::new();
+        restored.init(&entries);
+        assert_eq!(restored.pending_count(), 2);
+        restored.release(7);
+        assert_eq!(restored.free_pages, BTreeSet::from([10]));
+        assert_eq!(restored.pending_count(), 1);
+        restored.release(8);
+        assert_eq!(restored.free_pages, BTreeSet::from([10, 11]));
     }
 
     #[test]
