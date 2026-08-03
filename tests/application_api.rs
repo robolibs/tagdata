@@ -67,6 +67,21 @@ fn reusable_collection_supports_typed_crud_and_bounded_scans()
         let second_page = users.page_after(first_page.next.as_ref(), 2)?;
         assert_eq!(second_page.items, vec![(3, "Linus".into())]);
         assert!(second_page.next.is_none());
+        assert_eq!(users.keys().collect::<Result<Vec<_>, _>>()?, vec![1, 2, 3]);
+        assert_eq!(
+            users.values().collect::<Result<Vec<_>, _>>()?,
+            vec!["Ada", "Hopper", "Linus"]
+        );
+        assert_eq!(
+            users
+                .range_bounds((std::ops::Bound::Excluded(&1), std::ops::Bound::Included(&2)))?
+                .collect::<Result<Vec<_>, _>>()?,
+            vec![(2, "Hopper".into())]
+        );
+        assert_eq!(
+            users.range_rev(&1, &3)?.collect::<Result<Vec<_>, _>>()?,
+            vec![(2, "Hopper".into()), (1, "Ada".into())]
+        );
         Ok::<_, TransactionError<CodecError>>(())
     })?;
 
@@ -233,11 +248,13 @@ fn ordered_bulk_load_validates_monotonic_input() -> Result<(), Box<dyn std::erro
     let db = DB::open(&file)?;
     db.write(|tx| {
         let counters = tx.collection_mut(COUNTERS)?;
-        assert_eq!(counters.insert_ordered([(1, 10), (2, 20), (3, 30)])?, 3);
-        assert!(matches!(
-            counters.insert_ordered([(5, 50), (4, 40)]),
-            Err(CodecError::InputNotOrdered)
-        ));
+        let ordered = counters.insert_ordered([(1, 10), (2, 20), (3, 30)])?;
+        assert_eq!(ordered.inserted, 3);
+        assert!(ordered.ordered);
+        let fallback = counters.insert_ordered([(5, 50), (4, 40)])?;
+        assert_eq!(fallback.inserted, 2);
+        assert!(!fallback.ordered);
+        assert_eq!(counters.get(&4)?, Some(40));
         Ok::<_, TransactionError<CodecError>>(())
     })?;
     Ok(())

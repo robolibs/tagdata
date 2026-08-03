@@ -225,6 +225,16 @@ fn raw_buckets_offer_map_style_bulk_and_boundary_operations() -> Result<(), Erro
             vec![Some(b"1".to_vec()), None]
         );
         assert_eq!(map.delete_prefix("a"), Ok(2));
+        map.insert("count", b"4".to_vec())?;
+        assert_eq!(
+            map.update_value("count", |current| {
+                let value = current.unwrap()[0] - b'0';
+                Some(vec![b'0' + value + 1])
+            })?,
+            Some(b"4".to_vec())
+        );
+        assert_eq!(map.get_kv("count").unwrap().value(), b"5");
+        assert_eq!(map.update_value("count", |_| None)?, Some(b"5".to_vec()));
         assert_eq!(map.remove("b1")?, Some(b"3".to_vec()));
         assert!(map.is_empty());
         Ok(())

@@ -1,4 +1,8 @@
-use std::{marker::PhantomData, ops::Add, time::SystemTime};
+use std::{
+    marker::PhantomData,
+    ops::{Add, Bound, RangeBounds},
+    time::SystemTime,
+};
 
 use crate::{Bucket, CodecError, KeyCodec, ValueCodec};
 
@@ -21,6 +25,12 @@ impl WriteOptions {
 /// Marker implemented only by codecs intended for numeric updates.
 pub trait NumericValueCodec<N>: ValueCodec<N> {}
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BulkLoadResult {
+    pub inserted: usize,
+    pub ordered: bool,
+}
+
 /// Read capability for a typed collection.
 ///
 /// It intentionally exposes no mutating methods.
@@ -32,6 +42,17 @@ pub trait NumericValueCodec<N>: ValueCodec<N> {}
 ///     users: &ReadCollection<'_, '_, u64, String, TypedCodec<U64Codec, StringCodec>>,
 /// ) {
 ///     users.insert(&1, &"Ada".to_owned()).unwrap();
+/// }
+/// ```
+///
+/// Collection handles cannot outlive their transaction:
+///
+/// ```compile_fail
+/// use inspace::{CollectionDef, DB, ReadCollection, StringCodec, TypedCodec, U64Codec};
+///
+/// fn leak(db: &DB) -> ReadCollection<'static, 'static, u64, String, TypedCodec<U64Codec, StringCodec>> {
+///     let tx = db.read_tx().unwrap();
+///     tx.collection(CollectionDef::new("users", TypedCodec::new(U64Codec, StringCodec))).unwrap()
 /// }
 /// ```
 pub struct ReadCollection<'b, 'tx, K, V, C> {
@@ -74,7 +95,8 @@ where
             codec: self.codec.clone(),
             remaining: None,
             prefix: None,
-            end_exclusive: None,
+            lower_bound: None,
+            upper_bound: None,
             reverse: false,
             marker: PhantomData,
         }
@@ -89,7 +111,8 @@ where
             codec: self.codec.clone(),
             remaining: None,
             prefix: None,
-            end_exclusive: None,
+            lower_bound: None,
+            upper_bound: None,
             reverse: true,
             marker: PhantomData,
         }
@@ -104,7 +127,8 @@ where
             codec: self.codec.clone(),
             remaining: None,
             prefix: Some(prefix.to_vec()),
-            end_exclusive: None,
+            lower_bound: None,
+            upper_bound: None,
             reverse: false,
             marker: PhantomData,
         }
@@ -116,6 +140,14 @@ where
         }
         let key = self.codec.encode_key(key)?;
         Ok(self.iter_from_encoded(&key, false))
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = Result<K, CodecError>> + '_ {
+        self.iter().map(|entry| entry.map(|(key, _)| key))
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = Result<V, CodecError>> + '_ {
+        self.iter().map(|entry| entry.map(|(_, value)| value))
     }
 
     /// Returns a bounded page. `after` is exclusive and can be passed from the
@@ -163,18 +195,58 @@ where
         if !C::ORDER_PRESERVING {
             return Err(CodecError::OrderingRequired);
         }
+        self.range_bounds((Bound::Included(start), Bound::Excluded(end_exclusive)))
+    }
+
+    pub fn range_bounds<R>(&self, bounds: R) -> Result<CollectionIter<'b, 'tx, K, V, C>, CodecError>
+    where
+        R: RangeBounds<K>,
+    {
+        if !C::ORDER_PRESERVING {
+            return Err(CodecError::OrderingRequired);
+        }
+        let (start, exclusive) = match bounds.start_bound() {
+            Bound::Included(key) => (Some(self.codec.encode_key(key)?), false),
+            Bound::Excluded(key) => (Some(self.codec.encode_key(key)?), true),
+            Bound::Unbounded => (None, false),
+        };
+        let upper_bound = match bounds.end_bound() {
+            Bound::Included(key) => Some((self.codec.encode_key(key)?, true)),
+            Bound::Excluded(key) => Some((self.codec.encode_key(key)?, false)),
+            Bound::Unbounded => None,
+        };
+        let mut iter = match start {
+            Some(start) => self.iter_from_encoded(&start, exclusive),
+            None => self.iter(),
+        };
+        iter.upper_bound = upper_bound;
+        Ok(iter)
+    }
+
+    pub fn range_rev(
+        &self,
+        start: &K,
+        end_exclusive: &K,
+    ) -> Result<CollectionIter<'b, 'tx, K, V, C>, CodecError> {
+        if !C::ORDER_PRESERVING {
+            return Err(CodecError::OrderingRequired);
+        }
         let start = self.codec.encode_key(start)?;
-        let end_exclusive = self.codec.encode_key(end_exclusive)?;
+        let end = self.codec.encode_key(end_exclusive)?;
         let mut cursor = self.raw.cursor();
-        cursor.seek(&start);
+        let exact = cursor.seek(&end);
+        if exact {
+            cursor.previous();
+        }
         Ok(CollectionIter {
             cursor,
             raw: self.raw.clone_handle(),
             codec: self.codec.clone(),
             remaining: None,
             prefix: None,
-            end_exclusive: Some(end_exclusive),
-            reverse: false,
+            lower_bound: Some((start, true)),
+            upper_bound: None,
+            reverse: true,
             marker: PhantomData,
         })
     }
@@ -198,7 +270,9 @@ where
     fn iter_from_encoded(&self, key: &[u8], exclusive: bool) -> CollectionIter<'b, 'tx, K, V, C> {
         let mut cursor = self.raw.cursor();
         let exists = cursor.seek(key);
-        if exclusive && exists {
+        let skip_current = (exclusive && exists)
+            || (!exists && cursor.current().is_some_and(|current| current.key() < key));
+        if skip_current {
             cursor.next();
         }
         CollectionIter {
@@ -207,7 +281,8 @@ where
             codec: self.codec.clone(),
             remaining: None,
             prefix: None,
-            end_exclusive: None,
+            lower_bound: None,
+            upper_bound: None,
             reverse: false,
             marker: PhantomData,
         }
@@ -303,27 +378,28 @@ where
     }
 
     /// Inserts strictly increasing input through one collection handle.
-    pub fn insert_ordered<I>(&self, entries: I) -> Result<usize, CodecError>
+    pub fn insert_ordered<I>(&self, entries: I) -> Result<BulkLoadResult, CodecError>
     where
         I: IntoIterator<Item = (K, V)>,
     {
         if !C::ORDER_PRESERVING {
             return Err(CodecError::OrderingRequired);
         }
-        let mut previous = None::<Vec<u8>>;
-        let mut count = 0;
+        let mut encoded = Vec::new();
         for (key, value) in entries {
             let key = self.read.codec.encode_key(&key)?;
-            if previous.as_ref().is_some_and(|prior| prior >= &key) {
-                return Err(CodecError::InputNotOrdered);
-            }
             let value = self.read.codec.encode_value(&value)?;
-            self.read.raw.put(key.clone(), value)?;
-            self.read.raw.clear_ttl(&key)?;
-            previous = Some(key);
-            count += 1;
+            encoded.push((key, value));
         }
-        Ok(count)
+        let ordered = encoded.windows(2).all(|pair| pair[0].0 < pair[1].0);
+        for (key, value) in &encoded {
+            self.read.raw.put(key.clone(), value.clone())?;
+            self.read.raw.clear_ttl(key)?;
+        }
+        Ok(BulkLoadResult {
+            inserted: encoded.len(),
+            ordered,
+        })
     }
 
     pub fn clear(&self) -> Result<usize, CodecError> {

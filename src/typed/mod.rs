@@ -144,7 +144,6 @@ pub enum CodecError {
     Encode(String),
     Decode(String),
     OrderingRequired,
-    InputNotOrdered,
     InvalidDefinition,
     SchemaMissing {
         collection: &'static str,
@@ -178,7 +177,6 @@ impl fmt::Display for CodecError {
             Self::Encode(error) => write!(f, "encode error: {error}"),
             Self::Decode(error) => write!(f, "decode error: {error}"),
             Self::OrderingRequired => write!(f, "key codec does not preserve byte ordering"),
-            Self::InputNotOrdered => write!(f, "bulk input keys are not strictly ordered"),
             Self::InvalidDefinition => write!(f, "invalid collection definition"),
             Self::SchemaMissing { collection } => {
                 write!(f, "collection {collection:?} has no schema metadata")

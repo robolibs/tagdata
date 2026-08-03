@@ -114,6 +114,29 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
         Ok(count)
     }
 
+    /// Computes a replacement from the current bytes in this transaction.
+    /// Returning `None` deletes an existing value. The returned value is the
+    /// owned value observed before the update.
+    pub fn update_value<F>(&self, key: impl AsRef<[u8]>, update: F) -> Result<Option<Vec<u8>>>
+    where
+        F: FnOnce(Option<&[u8]>) -> Option<Vec<u8>>,
+    {
+        let key = key.as_ref().to_vec();
+        let previous = self.get_kv(&key).map(|pair| pair.value().to_vec());
+        match update(previous.as_deref()) {
+            Some(value) => {
+                self.put(key.clone(), value)?;
+                self.clear_ttl(&key)?;
+            }
+            None if previous.is_some() => {
+                self.delete(&key)?;
+                self.clear_ttl(&key)?;
+            }
+            None => {}
+        }
+        Ok(previous)
+    }
+
     pub fn remove_many<I, K>(&self, keys: I) -> Result<usize>
     where
         I: IntoIterator<Item = K>,

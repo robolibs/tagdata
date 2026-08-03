@@ -1,7 +1,7 @@
 use std::{
     cell::RefCell,
     rc::Rc,
-    sync::{Mutex, mpsc},
+    sync::{Arc, Mutex, mpsc},
 };
 
 use crate::{DB, Result};
@@ -36,6 +36,14 @@ pub struct ChangeSet {
 
 pub struct WatchSubscription {
     receiver: mpsc::Receiver<ChangeSet>,
+    terminal: Arc<Mutex<Option<WatchError>>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WatchError {
+    Empty,
+    Overflow,
+    Disconnected,
 }
 
 /// Best-effort process-local watch selection.
@@ -43,11 +51,17 @@ pub struct WatchSubscription {
 pub struct WatchFilter {
     bucket_path: Option<Vec<Vec<u8>>>,
     key_prefix: Option<Vec<u8>>,
+    key_range: Option<(Vec<u8>, Vec<u8>)>,
     operations: Vec<ChangeOperation>,
 }
 
 impl WatchFilter {
     pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates a filter whose subscription begins with commits after subscribe.
+    pub fn from_now() -> Self {
         Self::default()
     }
 
@@ -74,6 +88,18 @@ impl WatchFilter {
         self
     }
 
+    pub fn range(
+        mut self,
+        start_inclusive: impl AsRef<[u8]>,
+        end_exclusive: impl AsRef<[u8]>,
+    ) -> Self {
+        self.key_range = Some((
+            start_inclusive.as_ref().to_vec(),
+            end_exclusive.as_ref().to_vec(),
+        ));
+        self
+    }
+
     pub fn operations(mut self, operations: impl IntoIterator<Item = ChangeOperation>) -> Self {
         self.operations = operations.into_iter().collect();
         self
@@ -87,6 +113,10 @@ impl WatchFilter {
                 .key_prefix
                 .as_ref()
                 .is_none_or(|prefix| change.key.starts_with(prefix))
+            && self
+                .key_range
+                .as_ref()
+                .is_none_or(|(start, end)| change.key >= *start && change.key < *end)
             && (self.operations.is_empty() || self.operations.contains(&change.operation))
     }
 }
@@ -94,6 +124,7 @@ impl WatchFilter {
 struct WatchSender {
     sender: mpsc::SyncSender<ChangeSet>,
     filter: WatchFilter,
+    terminal: Arc<Mutex<Option<WatchError>>>,
 }
 
 impl WatchSubscription {
@@ -103,6 +134,25 @@ impl WatchSubscription {
 
     pub fn try_recv(&self) -> std::result::Result<ChangeSet, mpsc::TryRecvError> {
         self.receiver.try_recv()
+    }
+
+    pub fn recv_event(&self) -> std::result::Result<ChangeSet, WatchError> {
+        self.receiver.recv().map_err(|_| self.terminal_error())
+    }
+
+    pub fn try_recv_event(&self) -> std::result::Result<ChangeSet, WatchError> {
+        self.receiver.try_recv().map_err(|error| match error {
+            mpsc::TryRecvError::Empty => WatchError::Empty,
+            mpsc::TryRecvError::Disconnected => self.terminal_error(),
+        })
+    }
+
+    fn terminal_error(&self) -> WatchError {
+        self.terminal
+            .lock()
+            .ok()
+            .and_then(|reason| *reason)
+            .unwrap_or(WatchError::Disconnected)
     }
 }
 
@@ -119,8 +169,13 @@ impl WatchHub {
 
     fn subscribe(&self, capacity: usize, filter: WatchFilter) -> Result<WatchSubscription> {
         let (sender, receiver) = mpsc::sync_channel(capacity.max(1));
-        self.senders.lock()?.push(WatchSender { sender, filter });
-        Ok(WatchSubscription { receiver })
+        let terminal = Arc::new(Mutex::new(None));
+        self.senders.lock()?.push(WatchSender {
+            sender,
+            filter,
+            terminal: terminal.clone(),
+        });
+        Ok(WatchSubscription { receiver, terminal })
     }
 
     pub(crate) fn publish(&self, changes: ChangeSet) {
@@ -137,14 +192,25 @@ impl WatchHub {
             if selected.is_empty() && !changes.truncated {
                 return true;
             }
-            subscription
-                .sender
-                .try_send(ChangeSet {
-                    transaction_id: changes.transaction_id,
-                    changes: selected,
-                    truncated: changes.truncated,
-                })
-                .is_ok()
+            match subscription.sender.try_send(ChangeSet {
+                transaction_id: changes.transaction_id,
+                changes: selected,
+                truncated: changes.truncated,
+            }) {
+                Ok(()) => true,
+                Err(mpsc::TrySendError::Full(_)) => {
+                    if let Ok(mut terminal) = subscription.terminal.lock() {
+                        *terminal = Some(WatchError::Overflow);
+                    }
+                    false
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    if let Ok(mut terminal) = subscription.terminal.lock() {
+                        *terminal = Some(WatchError::Disconnected);
+                    }
+                    false
+                }
+            }
         });
     }
 }

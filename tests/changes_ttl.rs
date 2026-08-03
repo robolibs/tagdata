@@ -3,7 +3,7 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
-use inspace::{ChangeOperation, DB, Error, WatchFilter};
+use inspace::{ChangeOperation, DB, Error, WatchError, WatchFilter};
 
 mod common;
 
@@ -64,6 +64,36 @@ fn filtered_watches_keep_transaction_boundaries_and_select_changes() -> Result<(
     assert_eq!(set.changes.len(), 1);
     assert_eq!(set.changes[0].bucket_path, vec![b"users".to_vec()]);
     assert_eq!(set.changes[0].key, b"active/1");
+    Ok(())
+}
+
+#[test]
+fn watch_ranges_and_overflow_have_structured_semantics() -> Result<(), Error> {
+    let file = common::RandomFile::new();
+    let db = DB::open(&file)?;
+    db.update(|tx| {
+        tx.create_bucket("items")?;
+        Ok(())
+    })?;
+    let watch = db.watch_filtered(
+        1,
+        WatchFilter::from_now().collection("items").range("b", "d"),
+    )?;
+    db.update(|tx| {
+        let items = tx.get_bucket("items")?;
+        items.put("a", "outside")?;
+        items.put("b", "inside")?;
+        Ok(())
+    })?;
+    db.update(|tx| {
+        tx.get_bucket("items")?.put("c", "overflow")?;
+        Ok(())
+    })?;
+
+    let first = watch.recv_event().unwrap();
+    assert_eq!(first.changes.len(), 1);
+    assert_eq!(first.changes[0].key, b"b");
+    assert_eq!(watch.try_recv_event(), Err(WatchError::Overflow));
     Ok(())
 }
 

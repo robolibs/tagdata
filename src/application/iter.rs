@@ -26,7 +26,8 @@ pub struct CollectionIter<'b, 'tx, K, V, C> {
     pub(crate) codec: C,
     pub(crate) remaining: Option<usize>,
     pub(crate) prefix: Option<Vec<u8>>,
-    pub(crate) end_exclusive: Option<Vec<u8>>,
+    pub(crate) lower_bound: Option<(Vec<u8>, bool)>,
+    pub(crate) upper_bound: Option<(Vec<u8>, bool)>,
     pub(crate) reverse: bool,
     pub(crate) marker: PhantomData<fn() -> (K, V)>,
 }
@@ -55,8 +56,15 @@ where
             {
                 return None;
             }
-            if let Some(end) = &self.end_exclusive
-                && pair.key() >= end.as_slice()
+            if self.reverse {
+                if let Some((start, inclusive)) = &self.lower_bound
+                    && (pair.key() < start.as_slice()
+                        || (!inclusive && pair.key() == start.as_slice()))
+                {
+                    return None;
+                }
+            } else if let Some((end, inclusive)) = &self.upper_bound
+                && (pair.key() > end.as_slice() || (!inclusive && pair.key() == end.as_slice()))
             {
                 return None;
             }

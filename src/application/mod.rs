@@ -9,7 +9,9 @@ use std::marker::PhantomData;
 use crate::{Bucket, CodecError, KeyCodec, Tx, ValueCodec};
 
 pub use batch::Batch;
-pub use collection::{NumericValueCodec, ReadCollection, WriteCollection, WriteOptions};
+pub use collection::{
+    BulkLoadResult, NumericValueCodec, ReadCollection, WriteCollection, WriteOptions,
+};
 pub use definition::{CollectionDef, OpenPolicy};
 pub use entry::{CompareOutcome, Entry};
 pub use iter::{CollectionIter, PageToken, ScanPage};
