@@ -15,12 +15,18 @@ use memmap2::Mmap;
 use page_size::get as get_page_size;
 
 use crate::{
-    bucket::BucketMeta, coordination::Coordination, errors::Result, freelist::Freelist, meta::Meta,
-    page::Page, stats::Stats, tx::Tx,
+    bucket::BucketMeta,
+    coordination::Coordination,
+    errors::{Error, Result},
+    freelist::Freelist,
+    meta::Meta,
+    page::{Page, seal_block},
+    stats::Stats,
+    tx::Tx,
 };
 
 const MAGIC_VALUE: u32 = 0x00AB_CDEF;
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 // Minimum number of bytes to allocate when growing the databse
 pub(crate) const MIN_ALLOC_SIZE: u64 = 8 * 1024 * 1024;
@@ -132,6 +138,12 @@ impl OpenOptions {
         self
     }
 
+    /// Verifies the reachable page tree before returning from `open`.
+    pub fn verify_on_open(mut self, verify: bool) -> Self {
+        self.flags.verify_on_open = verify;
+        self
+    }
+
     /// Opens the database with the current options.
     ///
     /// If the file does not exist, it will initialize an empty database with a size of (`num_pages * pagesize`) bytes.
@@ -162,10 +174,14 @@ impl OpenOptions {
             open_file(path, false, self.flags.direct_writes, false)?
         };
 
-        let db = DBInner::open(file, self.pagesize, self.flags, path)?;
-        Ok(DB {
-            inner: Arc::new(db),
-        })
+        let verify_on_open = self.flags.verify_on_open;
+        let db = DB {
+            inner: Arc::new(DBInner::open(file, self.pagesize, self.flags, path)?),
+        };
+        if verify_on_open {
+            db.verify()?;
+        }
+        Ok(db)
     }
 }
 
@@ -183,16 +199,19 @@ impl Default for OpenOptions {
                 mmap_populate: false,
                 direct_writes: false,
                 read_only: false,
+                verify_on_open: false,
             },
         }
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct DBFlags {
     pub(crate) strict_mode: bool,
     pub(crate) mmap_populate: bool,
     pub(crate) direct_writes: bool,
     pub(crate) read_only: bool,
+    pub(crate) verify_on_open: bool,
 }
 
 /// A database
@@ -285,9 +304,14 @@ impl DB {
         })
     }
 
+    /// Validates checksums, page bounds, ordering, and reachability.
+    pub fn verify(&self) -> Result<()> {
+        self.tx(false)?.check()
+    }
+
     #[doc(hidden)]
     pub fn check(&self) -> Result<()> {
-        self.tx(false)?.check()
+        self.verify()
     }
 }
 pub(crate) struct DBInner {
@@ -334,7 +358,8 @@ impl DBInner {
         {
             let meta = db.meta()?;
             let data = db.data.lock()?;
-            let free_pages = Page::from_buf(&data, meta.freelist_page, pagesize).freelist();
+            let free_pages =
+                Page::validate_block(&data, meta.freelist_page, pagesize, meta.version)?.freelist();
 
             if !free_pages.is_empty() {
                 db.freelist.lock()?.init(free_pages);
@@ -364,7 +389,9 @@ impl DBInner {
     pub(crate) fn reload_freelist(&self) -> Result<()> {
         let meta = self.meta()?;
         let data = self.data.lock()?;
-        let free_pages = Page::from_buf(&data, meta.freelist_page, self.pagesize).freelist();
+        let free_pages =
+            Page::validate_block(&data, meta.freelist_page, self.pagesize, meta.version)?
+                .freelist();
         let mut freelist = Freelist::new();
         freelist.init(free_pages);
         *self.freelist.lock()? = freelist;
@@ -376,50 +403,34 @@ impl DBInner {
 
         macro_rules! check_meta {
             ($func:ident) => {{
-                let meta1 = Page::from_buf(&data, 0, self.pagesize).$func();
-                // Double check that we have the right pagesize before we read the second page.
-                if meta1.valid() && meta1.pagesize != self.pagesize {
-                    assert_eq!(
-                        meta1.pagesize, self.pagesize,
-                        "Invalid pagesize from meta1 {}. Expected {}.",
-                        meta1.pagesize, self.pagesize
-                    );
-                }
-                let meta2 = Page::from_buf(&data, 1, self.pagesize).$func();
-                match (meta1.valid(), meta2.valid()) {
+                let meta1 = Page::validate_block(&data, 0, self.pagesize, 1)
+                    .ok()
+                    .map(|page| page.$func());
+                let meta2 = Page::validate_block(&data, 1, self.pagesize, 1)
+                    .ok()
+                    .map(|page| page.$func());
+                let valid1 = meta1.is_some_and(|meta| {
+                    meta.valid()
+                        && meta.pagesize == self.pagesize
+                        && Page::validate_block(&data, 0, self.pagesize, meta.version).is_ok()
+                });
+                let valid2 = meta2.is_some_and(|meta| {
+                    meta.valid()
+                        && meta.pagesize == self.pagesize
+                        && Page::validate_block(&data, 1, self.pagesize, meta.version).is_ok()
+                });
+                match (valid1, valid2) {
                     (true, true) => {
-                        assert_eq!(
-                            meta1.pagesize, self.pagesize,
-                            "Invalid pagesize from meta1 {}. Expected {}.",
-                            meta1.pagesize, self.pagesize
-                        );
-                        assert_eq!(
-                            meta2.pagesize, self.pagesize,
-                            "Invalid pagesize from meta2 {}. Expected {}.",
-                            meta2.pagesize, self.pagesize
-                        );
+                        let meta1 = meta1.unwrap();
+                        let meta2 = meta2.unwrap();
                         if meta1.tx_id > meta2.tx_id {
                             Some(meta1)
                         } else {
                             Some(meta2)
                         }
                     }
-                    (true, false) => {
-                        assert_eq!(
-                            meta1.pagesize, self.pagesize,
-                            "Invalid pagesize from meta1 {}. Expected {}.",
-                            meta1.pagesize, self.pagesize
-                        );
-                        Some(meta1)
-                    }
-                    (false, true) => {
-                        assert_eq!(
-                            meta2.pagesize, self.pagesize,
-                            "Invalid pagesize from meta2 {}. Expected {}.",
-                            meta2.pagesize, self.pagesize
-                        );
-                        Some(meta2)
-                    }
+                    (true, false) => meta1,
+                    (false, true) => meta2,
                     (false, false) => None,
                 }
             }};
@@ -430,12 +441,22 @@ impl DBInner {
         } else if let Some(old_meta) = check_meta!(old_meta) {
             Ok(old_meta.into())
         } else {
-            panic!("NO VALID META PAGES");
+            Err(Error::InvalidDB("no valid metadata pages".into()))
         }
     }
 }
 
 fn init_file(path: &Path, pagesize: u64, num_pages: usize, direct_write: bool) -> Result<File> {
+    init_file_version(path, pagesize, num_pages, direct_write, VERSION)
+}
+
+fn init_file_version(
+    path: &Path,
+    pagesize: u64,
+    num_pages: usize,
+    direct_write: bool,
+    version: u32,
+) -> Result<File> {
     let mut file = open_file(path, true, direct_write, false)?;
     file.allocate(pagesize * (num_pages as u64))?;
     let mut buf = vec![0; (pagesize * 4) as usize];
@@ -452,7 +473,7 @@ fn init_file(path: &Path, pagesize: u64, num_pages: usize, direct_write: bool) -
         let m = page.meta_mut();
         m.meta_page = i as u32;
         m.magic = MAGIC_VALUE;
-        m.version = VERSION;
+        m.version = version;
         m.pagesize = pagesize;
         m.freelist_page = 2;
         m.root = BucketMeta {
@@ -472,6 +493,10 @@ fn init_file(path: &Path, pagesize: u64, num_pages: usize, direct_write: bool) -
     p.id = 3;
     p.page_type = Page::TYPE_LEAF;
     p.count = 0;
+
+    for page in buf.chunks_exact_mut(pagesize as usize) {
+        seal_block(page, version)?;
+    }
 
     file.write_all(&buf[..])?;
     file.flush()?;
@@ -538,6 +563,34 @@ mod tests {
             assert_eq!(db.pagesize(), 5000);
         }
         DB::open(&random_file).unwrap();
+    }
+
+    #[test]
+    fn opens_and_migrates_version_one_databases() -> Result<()> {
+        let source = RandomFile::new();
+        let destination = RandomFile::new();
+        drop(init_file_version(&source.path, 4096, 32, false, 1)?);
+
+        let db = OpenOptions::new().pagesize(4096).open(&source)?;
+        assert_eq!(db.inner.meta()?.version, 1);
+        let tx = db.tx(true)?;
+        tx.create_bucket("legacy")?.put("key", "value")?;
+        tx.commit()?;
+        db.verify()?;
+
+        db.compact_to(&destination.path)?;
+        let migrated = OpenOptions::new().pagesize(4096).open(&destination)?;
+        assert_eq!(migrated.inner.meta()?.version, VERSION);
+        assert_eq!(
+            migrated
+                .tx(false)?
+                .get_bucket("legacy")?
+                .get_kv("key")
+                .unwrap()
+                .value(),
+            b"value"
+        );
+        migrated.verify()
     }
 }
 

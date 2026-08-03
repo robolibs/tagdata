@@ -6,9 +6,10 @@ use std::{
 };
 
 use memmap2::Mmap;
+use sha3::{Digest, Sha3_256};
 
 use crate::{
-    errors::Result,
+    errors::{Error, Result},
     meta::{Meta, OldMeta},
     node::{Node, NodeData, NodeType},
 };
@@ -16,6 +17,9 @@ use crate::{
 pub(crate) type PageID = u64;
 
 pub(crate) type PageType = u8;
+
+pub(crate) const CHECKSUM_FORMAT_VERSION: u32 = 2;
+pub(crate) const CHECKSUM_SIZE: usize = 32;
 
 #[derive(Clone)]
 pub(crate) struct Pages {
@@ -34,6 +38,10 @@ impl Pages {
         unsafe {
             &*(&self.data[(id * self.pagesize) as usize] as *const u8 as *const Page)
         }
+    }
+
+    pub(crate) fn validate(&self, id: PageID, version: u32) -> Result<&Page> {
+        Page::validate_block(&self.data, id, self.pagesize, version)
     }
 }
 
@@ -62,6 +70,120 @@ impl Page {
         #[allow(clippy::cast_ptr_alignment)]
         unsafe {
             &*(&buf[(id * pagesize) as usize] as *const u8 as *const Page)
+        }
+    }
+
+    pub(crate) fn validate_block(
+        buf: &[u8],
+        id: PageID,
+        pagesize: u64,
+        version: u32,
+    ) -> Result<&Page> {
+        let offset = id
+            .checked_mul(pagesize)
+            .ok_or_else(|| Error::InvalidDB(format!("page {id} offset overflow")))?;
+        let offset = checked_usize(id, offset, "offset")?;
+        let header_end = offset
+            .checked_add(size_of::<Page>())
+            .ok_or_else(|| Error::InvalidDB(format!("page {id} header overflow")))?;
+        if header_end > buf.len() {
+            return Err(Error::InvalidDB(format!(
+                "page {id} is outside the mapped file"
+            )));
+        }
+
+        let page = Self::from_buf(buf, id, pagesize);
+        if page.id != id {
+            return Err(Error::InvalidDB(format!(
+                "page {id} contains page id {}",
+                page.id
+            )));
+        }
+        if !matches!(
+            page.page_type,
+            Self::TYPE_BRANCH | Self::TYPE_LEAF | Self::TYPE_META | Self::TYPE_FREELIST
+        ) {
+            return Err(Error::InvalidDB(format!(
+                "page {id} has invalid type {}",
+                page.page_type
+            )));
+        }
+        let block_pages = page
+            .overflow
+            .checked_add(1)
+            .ok_or_else(|| Error::InvalidDB(format!("page {id} overflow count overflow")))?;
+        let block_len = block_pages
+            .checked_mul(pagesize)
+            .ok_or_else(|| Error::InvalidDB(format!("page {id} block length overflow")))?;
+        let block_len = checked_usize(id, block_len, "block length")?;
+        let block_end = offset
+            .checked_add(block_len)
+            .ok_or_else(|| Error::InvalidDB(format!("page {id} block end overflow")))?;
+        if block_end > buf.len() {
+            return Err(Error::InvalidDB(format!(
+                "page {id} overflow block exceeds the file"
+            )));
+        }
+
+        let checksum_size = checksum_size(version);
+        if block_len < size_of::<Page>() + checksum_size {
+            return Err(Error::InvalidDB(format!("page {id} block is too small")));
+        }
+        if checksum_size > 0 {
+            verify_checksum(&buf[offset..block_end], id)?;
+        }
+        page.validate_layout(block_len - checksum_size)?;
+        Ok(page)
+    }
+
+    fn validate_layout(&self, data_limit: usize) -> Result<()> {
+        let data_offset = std::mem::offset_of!(Page, ptr);
+        match self.page_type {
+            Self::TYPE_META => ensure_end(self.id, data_offset, size_of::<Meta>(), data_limit),
+            Self::TYPE_FREELIST => ensure_end(
+                self.id,
+                data_offset,
+                checked_size(self.id, self.count, size_of::<PageID>())?,
+                data_limit,
+            ),
+            Self::TYPE_BRANCH => {
+                let elements_size = checked_size(self.id, self.count, size_of::<BranchElement>())?;
+                ensure_end(self.id, data_offset, elements_size, data_limit)?;
+                for (index, element) in self.branch_elements().iter().enumerate() {
+                    let element_offset = data_offset + index * size_of::<BranchElement>();
+                    let relative_end =
+                        element.pos.checked_add(element.key_size).ok_or_else(|| {
+                            Error::InvalidDB(format!("page {} branch key overflow", self.id))
+                        })?;
+                    let relative_end = checked_usize(self.id, relative_end, "branch key end")?;
+                    ensure_end(self.id, element_offset, relative_end, data_limit)?;
+                }
+                Ok(())
+            }
+            Self::TYPE_LEAF => {
+                let elements_size = checked_size(self.id, self.count, size_of::<LeafElement>())?;
+                ensure_end(self.id, data_offset, elements_size, data_limit)?;
+                for (index, element) in self.leaf_elements().iter().enumerate() {
+                    if !matches!(element.node_type, Node::TYPE_BUCKET | Node::TYPE_DATA) {
+                        return Err(Error::InvalidDB(format!(
+                            "page {} leaf {index} has invalid node type {}",
+                            self.id, element.node_type
+                        )));
+                    }
+                    let element_offset = data_offset + index * size_of::<LeafElement>();
+                    let relative_end = element
+                        .pos
+                        .checked_add(element.key_size)
+                        .and_then(|end| end.checked_add(element.value_size))
+                        .ok_or_else(|| {
+                            Error::InvalidDB(format!("page {} leaf data overflow", self.id))
+                        })?;
+                    let relative_end = checked_usize(self.id, relative_end, "leaf data end")?;
+                    ensure_end(self.id, element_offset, relative_end, data_limit)?;
+                }
+                Ok(())
+            }
+            _ => unreachable!(),
         }
     }
 
@@ -235,6 +357,57 @@ impl Page {
         }
         Ok(())
     }
+}
+
+pub(crate) fn seal_block(buf: &mut [u8], version: u32) -> Result<()> {
+    if checksum_size(version) == 0 {
+        return Ok(());
+    }
+    if buf.len() < CHECKSUM_SIZE {
+        return Err(Error::InvalidDB(
+            "cannot checksum a short page block".into(),
+        ));
+    }
+    let checksum_at = buf.len() - CHECKSUM_SIZE;
+    let hash = Sha3_256::digest(&buf[..checksum_at]);
+    buf[checksum_at..].copy_from_slice(&hash);
+    Ok(())
+}
+
+pub(crate) fn checksum_size(version: u32) -> usize {
+    usize::from(version >= CHECKSUM_FORMAT_VERSION) * CHECKSUM_SIZE
+}
+
+fn verify_checksum(buf: &[u8], id: PageID) -> Result<()> {
+    let checksum_at = buf.len() - CHECKSUM_SIZE;
+    let expected = Sha3_256::digest(&buf[..checksum_at]);
+    if expected.as_slice() != &buf[checksum_at..] {
+        return Err(Error::InvalidDB(format!("page {id} checksum mismatch")));
+    }
+    Ok(())
+}
+
+fn checked_size(id: PageID, count: u64, element_size: usize) -> Result<usize> {
+    checked_usize(id, count, "element count")?
+        .checked_mul(element_size)
+        .ok_or_else(|| Error::InvalidDB(format!("page {id} element count overflow")))
+}
+
+fn checked_usize(id: PageID, value: u64, field: &str) -> Result<usize> {
+    usize::try_from(value)
+        .map_err(|_| Error::InvalidDB(format!("page {id} {field} does not fit this platform")))
+}
+
+fn ensure_end(id: PageID, offset: usize, len: usize, limit: usize) -> Result<()> {
+    let end = offset
+        .checked_add(len)
+        .ok_or_else(|| Error::InvalidDB(format!("page {id} data offset overflow")))?;
+    if end > limit {
+        return Err(Error::InvalidDB(format!(
+            "page {id} data exceeds its block"
+        )));
+    }
+    Ok(())
 }
 
 #[repr(C)]

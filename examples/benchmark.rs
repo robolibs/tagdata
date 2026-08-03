@@ -1,7 +1,9 @@
-use std::fs;
 use std::time::Instant;
+use std::{fs, hash::Hasher};
 
+use fnv::FnvHasher;
 use inspace::{DB, Error};
+use sha3::{Digest, Sha3_256};
 
 const ITEMS: u64 = 100_000;
 
@@ -47,6 +49,21 @@ fn main() -> Result<(), Error> {
     println!("pages:       {} allocated", stats.allocated_pages);
     println!("written:     {} bytes", stats.bytes_written);
 
+    let started = Instant::now();
+    db.verify()?;
+    println!("full verify: {:#?}", started.elapsed());
+
+    let bytes = fs::read(&path)?;
+    let started = Instant::now();
+    let _ = Sha3_256::digest(&bytes);
+    println!("SHA3-256:    {:#?}", started.elapsed());
+    let started = Instant::now();
+    let mut fnv = FnvHasher::default();
+    fnv.write(&bytes);
+    let _ = fnv.finish();
+    println!("FNV-1a-64:   {:#?}", started.elapsed());
+
+    drop(db);
     fs::remove_file(path)?;
     Ok(())
 }

@@ -21,7 +21,7 @@ use crate::{
     freelist::TxFreelist,
     meta::Meta,
     node::Node,
-    page::{Page, PageID, Pages},
+    page::{Page, PageID, Pages, seal_block},
     support::failpoints,
 };
 
@@ -197,7 +197,7 @@ impl<'tx> Tx<'tx> {
 
         let data = db.inner.data.lock()?.clone();
         let pages = Pages::new(data, db.inner.pagesize);
-        let num_freelist_pages = pages.page(meta.freelist_page).overflow + 1;
+        let num_freelist_pages = pages.validate(meta.freelist_page, meta.version)?.overflow + 1;
         let root = InnerBucket::from_meta(meta.root, pages.clone());
         let root = Rc::new(RefCell::new(root));
         let inner = TxInner {
@@ -376,7 +376,8 @@ impl<'tx> TxInner<'tx> {
                 // freelist.pages is a BTreeMap so we're writing the pages in order to minmize
                 // the random seeks.
                 for (page_id, (ptr, size)) in freelist.pages.iter() {
-                    let buf = unsafe { std::slice::from_raw_parts(ptr.as_ptr(), *size) };
+                    let buf = unsafe { std::slice::from_raw_parts_mut(ptr.as_ptr(), *size) };
+                    seal_block(buf, self.meta.version)?;
                     file.seek(SeekFrom::Start(self.db.inner.pagesize * page_id))?;
                     file.write_all(buf)?;
                 }
@@ -411,6 +412,7 @@ impl<'tx> TxInner<'tx> {
                 m.freelist_page = self.meta.freelist_page;
                 m.tx_id = self.meta.tx_id;
                 m.hash = m.hash_self();
+                seal_block(&mut buf, self.meta.version)?;
 
                 file.seek(SeekFrom::Start(self.db.inner.pagesize * meta_page_id))?;
                 file.write_all(buf.as_slice())?;
@@ -456,7 +458,7 @@ impl<'tx> TxInner<'tx> {
                     page_id,
                 )));
             }
-            let page = self.pages.page(page_id);
+            let page = self.pages.validate(page_id, self.meta.version)?;
             // Make sure none of the overflow pages have been used
             for i in 0..page.overflow {
                 let page_id = page_id + i + 1;

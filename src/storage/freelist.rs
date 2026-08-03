@@ -10,7 +10,7 @@ use bumpalo::Bump;
 use crate::{
     Result,
     meta::Meta,
-    page::{Page, PageID},
+    page::{Page, PageID, checksum_size},
 };
 
 pub(crate) struct TxFreelist {
@@ -45,10 +45,11 @@ impl<'a> TxFreelist {
             size_of::<Page>(),
             bytes < (size_of::<Page>() as u64)
         );
-        let num_pages = if bytes.is_multiple_of(self.meta.pagesize) {
-            bytes / self.meta.pagesize
+        let required_bytes = bytes + checksum_size(self.meta.version) as u64;
+        let num_pages = if required_bytes.is_multiple_of(self.meta.pagesize) {
+            required_bytes / self.meta.pagesize
         } else {
-            (bytes / self.meta.pagesize) + 1
+            (required_bytes / self.meta.pagesize) + 1
         };
         let page_id = match self.inner.allocate(num_pages as usize) {
             Some(page_id) => page_id,
@@ -59,14 +60,22 @@ impl<'a> TxFreelist {
             }
         };
 
+        let stored_bytes = if checksum_size(self.meta.version) > 0 {
+            num_pages * self.meta.pagesize
+        } else {
+            bytes
+        };
         let ptr = self
             .arena
-            .alloc_layout(Layout::from_size_align(bytes as usize, 8)?);
+            .alloc_layout(Layout::from_size_align(stored_bytes as usize, 8)?);
+        if checksum_size(self.meta.version) > 0 {
+            unsafe { std::ptr::write_bytes(ptr.as_ptr(), 0, stored_bytes as usize) };
+        }
 
         let page = unsafe { &mut *(ptr.as_ptr() as *mut Page) };
         page.id = page_id;
         page.overflow = num_pages - 1;
-        self.pages.insert(page_id, (ptr, bytes as usize));
+        self.pages.insert(page_id, (ptr, stored_bytes as usize));
 
         Ok(page)
     }
@@ -307,8 +316,8 @@ mod tests {
         // make sure we have an empty freelist and only four pages
         assert_eq!(freelist.inner.pages().len(), 0);
         assert_eq!(tx.meta.num_pages, 4);
-        // allocate one page worth of bytes
-        let page = freelist.allocate(1024)?;
+        // Version 2 reserves the final 32 bytes of each block for its checksum.
+        let page = freelist.allocate(1024 - 32)?;
         assert!(page.id == 4);
         assert!(page.overflow == 0);
         // allocate a half page worth of bytes
@@ -316,8 +325,8 @@ mod tests {
         assert!(page.id == 5);
         assert!(page.overflow == 0);
 
-        // allocate ten pages worth of bytes
-        let page = freelist.allocate(10240)?;
+        // allocate ten pages worth of payload and checksum bytes
+        let page = freelist.allocate(10240 - 32)?;
         assert!(page.id == 6);
         assert!(page.overflow == 9);
 
@@ -347,8 +356,8 @@ mod tests {
         freelist.inner.release(1);
         freelist.meta.num_pages = 99;
 
-        // allocate one page worth of bytes (should come from freelist)
-        let page = freelist.allocate(1024)?;
+        // allocate one page worth of payload (should come from freelist)
+        let page = freelist.allocate(1024 - 32)?;
         assert!(page.id == 10);
         assert!(page.overflow == 0);
         // allocate a half page worth of bytes (should come from freelist)
