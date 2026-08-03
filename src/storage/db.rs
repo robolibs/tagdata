@@ -97,7 +97,8 @@ impl OpenOptions {
         self
     }
 
-    /// Enables or disables the [MAP_POPULATE flag](MAP_POPULATE) for the `mmap` call, which will cause Linux to eagerly load pages into memory.
+    /// Enables or disables the [MAP_POPULATE flag](https://man7.org/linux/man-pages/man2/mmap.2.html)
+    /// for the `mmap` call, which will cause Linux to eagerly load pages into memory.
     ///
     /// The default is `false`, but you may enable this if your database file will stay smaller than your available memory.
     /// It is not recommended to enable this unless you know what you are doing.
@@ -390,6 +391,7 @@ fn init_file(path: &Path, pagesize: u64, num_pages: usize, direct_write: bool) -
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use crate::testutil::RandomFile;

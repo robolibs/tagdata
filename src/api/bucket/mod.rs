@@ -76,7 +76,8 @@ mod tests;
 /// In order to keep the database flexible, it is possible to obtain references to multiple sub-buckets from a single parent.
 /// That means it is possible to obtain a reference to a bucket, then delete that bucket from the parent. Do not do this.
 /// If you try to use a bucket that has been deleted it will panic, and nobody wants that 🙃.
-/// The same is true for any iterator over a bucket as well, like a [`Cursor`], [`Buckets`], or [`KVPairs`].
+/// The same is true for any iterator over a bucket as well, like a [`Cursor`],
+/// [`crate::Buckets`], or [`crate::KVPairs`].
 pub struct Bucket<'b, 'tx: 'b> {
     pub(crate) inner: Rc<RefCell<InnerBucket<'tx>>>,
     pub(crate) freelist: Rc<RefCell<TxFreelist>>,

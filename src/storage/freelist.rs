@@ -45,7 +45,7 @@ impl<'a> TxFreelist {
             size_of::<Page>(),
             bytes < (size_of::<Page>() as u64)
         );
-        let num_pages = if (bytes % self.meta.pagesize) == 0 {
+        let num_pages = if bytes.is_multiple_of(self.meta.pagesize) {
             bytes / self.meta.pagesize
         } else {
             (bytes / self.meta.pagesize) + 1
@@ -102,7 +102,7 @@ impl Freelist {
             "cannot free page {}, reserved for meta",
             page_id
         );
-        let pages = self.pending_pages.entry(tx_id).or_insert_with(Vec::new);
+        let pages = self.pending_pages.entry(tx_id).or_default();
         pages.push(page_id);
     }
 

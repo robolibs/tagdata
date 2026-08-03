@@ -4,58 +4,51 @@
 
 See [acknowledgments](ACKOLEGMENT.md) for prior work that informed the project.
 
-## Current engine
+## Engine
 
-- **Zero-copy point reads:** values are borrowed directly from a read-only mmap.
-- **Concurrent readers, single writer:** read transactions share the map; a write
-  transaction takes exclusive access only until its durable commit completes.
-- **Atomic callback transactions:** an error from the callback writes nothing.
-- **Crash recovery:** checksummed tree pages are published through alternating
-  meta pages; an invalid newest meta page falls back to the prior commit.
-- **Fast lookup:** an in-memory, collision-safe hash index points into the mmap.
+- **ACID transactions:** serializable and isolated transactions with explicit
+  commit and automatic rollback on drop.
+- **Concurrent access:** multiple lock-free readers and one concurrent writer.
+- **Memory-mapped reads:** values are read directly from the mapped database file.
+- **B+ tree storage:** efficient random lookups and ordered sequential access.
 - **Nested buckets:** byte-key/byte-value namespaces can form arbitrary trees.
 - **Ordered traversal:** cursors, key/value iterators, bucket iterators, and ranges.
-- **Single-process ownership:** an exclusive file lock prevents unsafe concurrent opens.
-- **Small dependency surface:** storage uses `memmap2` and `fs4`.
+- **Space reuse:** freed pages are tracked and reused by later transactions.
+- **Configurable opening:** page size, initial allocation, mmap population, strict
+  checks, and direct writes are available through `OpenOptions`.
 
 ```rust
-use inspace::{Database, Error};
+use inspace::{DB, Error};
 
 fn main() -> Result<(), Error> {
-    let db = Database::open("my.db")?;
+    let db = DB::open("my.db")?;
 
-    db.update(|tx| {
-        tx.create_bucket("names")?;
-        tx.put("names", "Kanan", "Jarrus")?;
-        tx.put("names", "Ezra", "Bridger")
-    })?;
+    let tx = db.tx(true)?;
+    let names = tx.create_bucket("names")?;
+    names.put("Kanan", "Jarrus")?;
+    names.put("Ezra", "Bridger")?;
+    tx.commit()?;
 
-    db.view(|tx| {
-        let names = tx.bucket(b"names")?;
-        assert_eq!(
-            names.get_kv(b"Kanan").map(|pair| pair.value()),
-            Some(&b"Jarrus"[..])
-        );
-        Ok(())
-    })
+    let tx = db.tx(false)?;
+    let names = tx.get_bucket("names")?;
+    assert!(names
+        .get_kv(b"Kanan")
+        .is_some_and(|pair| pair.value() == b"Jarrus"));
+    Ok(())
 }
 ```
 
 ## Storage layout
 
-The current format uses fixed-size copy-on-write pages:
+The format uses fixed-size pages:
 
 ```text
-meta page A | meta page B
-leaf and branch pages for commit 0
-leaf and branch pages for commit 1
-leaf and branch pages for commit 2
+meta pages | freelist | leaf and branch pages
 ```
 
-The writer builds and syncs new tree pages before publishing their root through
-one checksummed meta page. The other meta page retains the previous root. Nodes
-may span multiple pages for large values. Readers borrow values from the mapped
-leaf pages while holding a shared transaction lock.
+Write transactions update a copy-on-write B+ tree and publish a new meta page
+when committed. Large nodes can span multiple pages, and the freelist makes
+released pages available to future writes.
 
 ## Commands
 
@@ -66,17 +59,3 @@ make test
 make benchmark
 make verify
 ```
-
-## Scope and roadmap
-
-This is a functional first engine. Before a stable 1.0, `inspace` still needs:
-
-1. incremental tree updates instead of rebuilding all live records per commit;
-2. snapshot readers that remain active while a writer publishes new pages;
-3. freelist management and online/offline compaction;
-4. explicit read-only open mode and configurable mapping/page behavior;
-5. fuzzing, crash-injection tests, format compatibility tests, and comparative
-   database benchmarks.
-
-The on-disk format is currently experimental. Do not use this version for the
-only copy of critical data, and do not open one file from multiple processes.

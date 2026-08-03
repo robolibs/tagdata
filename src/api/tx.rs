@@ -123,7 +123,7 @@ impl<'tx> Tx<'tx> {
             let mut open_ro_txs = db.inner.open_ro_txs.lock().unwrap();
             if writable {
                 meta.tx_id += 1;
-                if open_ro_txs.len() > 0 {
+                if !open_ro_txs.is_empty() {
                     freelist.release(open_ro_txs[0]);
                 } else {
                     freelist.release(meta.tx_id);
@@ -390,13 +390,13 @@ impl<'tx> TxInner<'tx> {
                         // Make sure we visit every branch page
                         page_stack.push(b.page);
                         // and that the keys are in order
-                        if let Some(last) = last {
-                            if last >= b.key() {
-                                return Err(Error::InvalidDB(format!(
-                                    "Branch page {} contains unsorted elements",
-                                    page_id
-                                )));
-                            }
+                        if let Some(last) = last
+                            && last >= b.key()
+                        {
+                            return Err(Error::InvalidDB(format!(
+                                "Branch page {} contains unsorted elements",
+                                page_id
+                            )));
                         }
                         last = Some(b.key());
                     }
@@ -421,16 +421,13 @@ impl<'tx> TxInner<'tx> {
                             }
                         }
                         // Make sure all leaf elements are in order
-                        if let Some(last) = last {
-                            if last >= leaf.key() {
-                                // let keys: Vec<&[u8]> =
-                                //     page.leaf_elements().iter().map(|l| l.key()).collect();
-                                // let key = leaf.key();
-                                return Err(Error::InvalidDB(format!(
-                                    "Leaf page {} contains unsorted elements",
-                                    page_id
-                                )));
-                            }
+                        if let Some(last) = last
+                            && last >= leaf.key()
+                        {
+                            return Err(Error::InvalidDB(format!(
+                                "Leaf page {} contains unsorted elements",
+                                page_id
+                            )));
                         }
                         last = Some(leaf.key());
                     }

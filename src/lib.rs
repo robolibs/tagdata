@@ -34,7 +34,7 @@
 //!     let db = DB::open("my-database.db")?;
 //!
 //!     // open a writable transaction so we can make changes
-//!     let mut tx = db.tx(true)?;
+//!     let tx = db.tx(true)?;
 //!
 //!     // create a bucket to store a map of first names to last names
 //!     let mut names_bucket = tx.create_bucket("names")?;
@@ -48,7 +48,7 @@
 //!     // open the existing database file
 //!     let db = DB::open("my-database.db")?;
 //!     // open a read-only transaction to get the data
-//!     let mut tx = db.tx(true)?;
+//!     let tx = db.tx(false)?;
 //!     // get the bucket we created in the last transaction
 //!     let names_bucket = tx.get_bucket("names")?;
 //!     // get the key / value pair we inserted into the bucket
@@ -97,7 +97,7 @@
 //!     // open the existing database file
 //!     let db = DB::open("my-database.db")?;
 //!     // open a read-only transaction to get the data
-//!     let mut tx = db.tx(true)?;
+//!     let tx = db.tx(false)?;
 //!     // get the bucket we created in the last transaction
 //!     let users_bucket = tx.get_bucket("users")?;
 //!     // get the key / value pair we inserted into the bucket

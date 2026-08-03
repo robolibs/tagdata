@@ -1,37 +1,38 @@
 use std::fs;
 use std::time::Instant;
 
-use inspace::{Database, Error};
+use inspace::{DB, Error};
 
 const ITEMS: u64 = 100_000;
 
 fn main() -> Result<(), Error> {
     let path = std::env::temp_dir().join("inspace-benchmark.db");
     let _ = fs::remove_file(&path);
-    let db = Database::open(&path)?;
+    let db = DB::open(&path)?;
 
     let started = Instant::now();
-    db.update(|tx| {
-        tx.create_bucket("bench")?;
-        for number in 0..ITEMS {
-            tx.put("bench", number.to_le_bytes(), number.to_le_bytes())?;
-        }
-        Ok(())
-    })?;
+    let tx = db.tx(true)?;
+    let bucket = tx.create_bucket("bench")?;
+    for number in 0..ITEMS {
+        bucket.put(number.to_le_bytes(), number.to_le_bytes())?;
+    }
+    tx.commit()?;
     let write_elapsed = started.elapsed();
 
     let started = Instant::now();
-    db.view(|tx| {
-        let bucket = tx.bucket(b"bench")?;
-        for number in 0..ITEMS {
-            assert_eq!(
-                bucket.get_kv(number.to_le_bytes()).map(|pair| pair.value()),
-                Some(&number.to_le_bytes()[..])
-            );
-        }
-        Ok(())
-    })?;
+    let tx = db.tx(false)?;
+    let bucket = tx.get_bucket("bench")?;
+    for number in 0..ITEMS {
+        assert!(
+            bucket
+                .get_kv(number.to_le_bytes())
+                .is_some_and(|pair| pair.value() == number.to_le_bytes())
+        );
+    }
     let read_elapsed = started.elapsed();
+
+    drop(bucket);
+    drop(tx);
 
     println!(
         "batch write: {:>10.0} ops/s ({write_elapsed:?})",

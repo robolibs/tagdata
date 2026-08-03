@@ -217,18 +217,15 @@ where
     type Item = Data<'b, 'tx>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if !self.c.next_called {
-            if let Bound::Included(s) = self.bounds.start_bound() {
-                let exists = self.c.seek(*s);
-                // if the start key is not there,
-                // skip to the key after where it should be.
-                if !exists {
-                    if let Some(data) = self.c.current() {
-                        if data.key() < *s {
-                            self.c.next();
-                        }
-                    }
-                }
+        if !self.c.next_called
+            && let Bound::Included(s) = self.bounds.start_bound()
+        {
+            let exists = self.c.seek(*s);
+            if !exists
+                && let Some(data) = self.c.current()
+                && data.key() < *s
+            {
+                self.c.next();
             }
         }
         let next = self.c.next();
