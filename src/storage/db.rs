@@ -19,6 +19,7 @@ use crate::{
     changes::WatchHub,
     coordination::Coordination,
     errors::{Error, Result},
+    format::FormatInfo,
     freelist::Freelist,
     meta::Meta,
     page::{Page, seal_block},
@@ -26,8 +27,8 @@ use crate::{
     tx::Tx,
 };
 
-const MAGIC_VALUE: u32 = 0x00AB_CDEF;
-const VERSION: u32 = 2;
+pub(crate) const MAGIC_VALUE: u32 = 0x00AB_CDEF;
+pub(crate) const VERSION: u32 = 2;
 
 // Minimum number of bytes to allocate when growing the databse
 pub(crate) const MIN_ALLOC_SIZE: u64 = 8 * 1024 * 1024;
@@ -57,8 +58,10 @@ const DEFAULT_NUM_PAGES: usize = 32;
 /// # }
 /// ```
 pub struct OpenOptions {
-    pagesize: u64,
+    pagesize: Option<u64>,
     num_pages: usize,
+    max_file_bytes: Option<u64>,
+    growth_increment: u64,
     flags: DBFlags,
 }
 
@@ -80,7 +83,24 @@ impl OpenOptions {
         if pagesize < 1024 {
             panic!("Pagesize must be 1024 bytes minimum");
         }
-        self.pagesize = pagesize;
+        self.pagesize = Some(pagesize);
+        self
+    }
+
+    /// Sets a hard upper bound for the database file.
+    pub fn max_file_bytes(mut self, bytes: u64) -> Self {
+        assert!(
+            bytes >= 4096,
+            "Maximum file size must be at least 4096 bytes"
+        );
+        self.max_file_bytes = Some(bytes);
+        self
+    }
+
+    /// Sets the allocation quantum used when the file grows.
+    pub fn growth_increment(mut self, bytes: u64) -> Self {
+        assert!(bytes > 0, "Growth increment must be non-zero");
+        self.growth_increment = bytes;
         self
     }
 
@@ -162,22 +182,58 @@ impl OpenOptions {
     /// Will panic if the pagesize the database is opened with is not the same as the pagesize it was created with.
     pub fn open<P: AsRef<Path>>(self, path: P) -> Result<DB> {
         let path: &Path = path.as_ref();
+        let exists = path.exists();
+        let pagesize = if exists {
+            match (self.pagesize, FormatInfo::inspect(path)) {
+                (None, Ok(info)) => info.page_size,
+                (Some(explicit), Ok(info)) if explicit == info.page_size => explicit,
+                (Some(explicit), Ok(info)) => {
+                    return Err(Error::InvalidDB(format!(
+                        "explicit page size {explicit} conflicts with detected page size {}",
+                        info.page_size
+                    )));
+                }
+                (Some(explicit), Err(_)) => explicit,
+                (None, Err(error)) => return Err(error),
+            }
+        } else {
+            self.pagesize.unwrap_or_else(|| get_page_size() as u64)
+        };
+        let initial_bytes = pagesize.saturating_mul(self.num_pages as u64);
+        if !exists
+            && let Some(maximum) = self.max_file_bytes
+            && initial_bytes > maximum
+        {
+            return Err(Error::CapacityExceeded {
+                required: initial_bytes,
+                maximum,
+            });
+        }
         let file = if self.flags.read_only {
             open_file(path, false, false, true)?
-        } else if !path.exists() {
-            init_file(
-                path,
-                self.pagesize,
-                self.num_pages,
-                self.flags.direct_writes,
-            )?
+        } else if !exists {
+            init_file(path, pagesize, self.num_pages, self.flags.direct_writes)?
         } else {
             open_file(path, false, self.flags.direct_writes, false)?
         };
 
+        if let Some(maximum) = self.max_file_bytes {
+            let required = file.metadata()?.len();
+            if required > maximum {
+                return Err(Error::CapacityExceeded { required, maximum });
+            }
+        }
+
         let verify_on_open = self.flags.verify_on_open;
         let db = DB {
-            inner: Arc::new(DBInner::open(file, self.pagesize, self.flags, path)?),
+            inner: Arc::new(DBInner::open(
+                file,
+                pagesize,
+                self.flags,
+                path,
+                self.max_file_bytes,
+                self.growth_increment,
+            )?),
         };
         if verify_on_open {
             db.verify()?;
@@ -193,8 +249,10 @@ impl Default for OpenOptions {
             panic!("Pagesize must be 1024 bytes minimum");
         }
         OpenOptions {
-            pagesize,
+            pagesize: None,
             num_pages: DEFAULT_NUM_PAGES,
+            max_file_bytes: None,
+            growth_increment: MIN_ALLOC_SIZE,
             flags: DBFlags {
                 strict_mode: false,
                 mmap_populate: false,
@@ -377,6 +435,8 @@ pub(crate) struct DBInner {
     pub(crate) flags: DBFlags,
 
     pub(crate) pagesize: u64,
+    pub(crate) max_file_bytes: Option<u64>,
+    pub(crate) growth_increment: u64,
     pub(crate) committed_transactions: AtomicU64,
     pub(crate) bytes_written: AtomicU64,
     pub(crate) path: PathBuf,
@@ -384,7 +444,14 @@ pub(crate) struct DBInner {
 }
 
 impl DBInner {
-    pub(crate) fn open(file: File, pagesize: u64, flags: DBFlags, path: &Path) -> Result<DBInner> {
+    pub(crate) fn open(
+        file: File,
+        pagesize: u64,
+        flags: DBFlags,
+        path: &Path,
+        max_file_bytes: Option<u64>,
+        growth_increment: u64,
+    ) -> Result<DBInner> {
         if flags.read_only {
             FileExt::lock_shared(&file)?;
         }
@@ -404,6 +471,8 @@ impl DBInner {
             coordination,
 
             pagesize,
+            max_file_bytes,
+            growth_increment,
             flags,
             committed_transactions: AtomicU64::new(0),
             bytes_written: AtomicU64::new(0),
@@ -467,11 +536,15 @@ impl DBInner {
                     .map(|page| page.$func());
                 let valid1 = meta1.is_some_and(|meta| {
                     meta.valid()
+                        && meta.magic == MAGIC_VALUE
+                        && (1..=VERSION).contains(&meta.version)
                         && meta.pagesize == self.pagesize
                         && Page::validate_block(&data, 0, self.pagesize, meta.version).is_ok()
                 });
                 let valid2 = meta2.is_some_and(|meta| {
                     meta.valid()
+                        && meta.magic == MAGIC_VALUE
+                        && (1..=VERSION).contains(&meta.version)
                         && meta.pagesize == self.pagesize
                         && Page::validate_block(&data, 1, self.pagesize, meta.version).is_ok()
                 });
@@ -606,8 +679,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn test_different_pagesizes() {
+    fn test_different_pagesizes_are_detected() {
         assert_ne!(get_page_size(), 5000);
         let random_file = RandomFile::new();
         {
@@ -618,7 +690,7 @@ mod tests {
                 .unwrap();
             assert_eq!(db.pagesize(), 5000);
         }
-        DB::open(&random_file).unwrap();
+        assert_eq!(DB::open(&random_file).unwrap().pagesize(), 5000);
     }
 
     #[test]

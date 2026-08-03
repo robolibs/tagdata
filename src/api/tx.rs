@@ -17,7 +17,7 @@ use crate::{
     changes::{ChangeOperation, ChangeTracker},
     coordination::{GateGuard, ReaderRegistration},
     cursor::ToBuckets,
-    db::{DB, MIN_ALLOC_SIZE},
+    db::DB,
     errors::{Error, Result},
     freelist::TxFreelist,
     meta::Meta,
@@ -456,12 +456,31 @@ impl<'tx> TxInner<'tx> {
             self.meta.num_pages = freelist.meta.num_pages;
 
             // Grow the file, if needed
-            let required_size = self.meta.num_pages * self.db.inner.pagesize;
+            let required_size = self
+                .meta
+                .num_pages
+                .checked_mul(self.db.inner.pagesize)
+                .ok_or_else(|| Error::InvalidDB("required file size overflow".into()))?;
+            if let Some(maximum) = self.db.inner.max_file_bytes
+                && required_size > maximum
+            {
+                return Err(Error::CapacityExceeded {
+                    required: required_size,
+                    maximum,
+                });
+            }
             let current_size = file.metadata()?.len();
             if current_size < required_size {
                 let size_diff = required_size - current_size;
-                let alloc_size = ((size_diff / MIN_ALLOC_SIZE) + 1) * MIN_ALLOC_SIZE;
-                let data = self.db.inner.resize(file, current_size + alloc_size)?;
+                let increment = self.db.inner.growth_increment;
+                let increments = size_diff.div_ceil(increment);
+                let mut new_size = current_size
+                    .checked_add(increments.saturating_mul(increment))
+                    .ok_or_else(|| Error::InvalidDB("file growth overflow".into()))?;
+                if let Some(maximum) = self.db.inner.max_file_bytes {
+                    new_size = new_size.min(maximum);
+                }
+                let data = self.db.inner.resize(file, new_size)?;
                 self.pages = Pages::new(data, self.db.inner.pagesize);
             }
 

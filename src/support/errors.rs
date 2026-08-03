@@ -19,6 +19,8 @@ pub enum Error {
     ReadOnlyDB,
     /// The writer slot was not acquired before the requested deadline
     WriterTimeout,
+    /// A commit or initial allocation would exceed the configured file limit.
+    CapacityExceeded { required: u64, maximum: u64 },
     /// Wrapper around a [`std::io::Error`] that occurred while opening the file or writing to it
     Io(std::io::Error),
     /// Wrapper around a [`PoisonError`]
@@ -41,6 +43,10 @@ impl fmt::Display for Error {
             Error::ReadOnlyTx => write!(f, "Cannot write in a read-only transaction"),
             Error::ReadOnlyDB => write!(f, "Cannot write to a read-only database"),
             Error::WriterTimeout => write!(f, "Timed out waiting for the database writer"),
+            Error::CapacityExceeded { required, maximum } => write!(
+                f,
+                "Database capacity exceeded: requires {required} bytes, maximum is {maximum} bytes"
+            ),
             Error::Io(e) => write!(f, "IO Error: {}", e),
             Error::Sync(s) => write!(f, "Sync Error: {}", s),
             Error::InvalidDB(s) => write!(f, "Invalid DB: {}", s),
@@ -77,6 +83,16 @@ impl PartialEq for Error {
             (Error::ReadOnlyTx, Error::ReadOnlyTx) => true,
             (Error::ReadOnlyDB, Error::ReadOnlyDB) => true,
             (Error::WriterTimeout, Error::WriterTimeout) => true,
+            (
+                Error::CapacityExceeded {
+                    required: required1,
+                    maximum: maximum1,
+                },
+                Error::CapacityExceeded {
+                    required: required2,
+                    maximum: maximum2,
+                },
+            ) => required1 == required2 && maximum1 == maximum2,
             (Error::Sync(s1), Error::Sync(s2)) => s1 == s2,
             (Error::InvalidDB(s1), Error::InvalidDB(s2)) => s1 == s2,
             _ => false,
