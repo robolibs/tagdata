@@ -35,15 +35,24 @@ fn persists_zero_copy_values_across_reopen() -> Result<()> {
         assert_eq!(db.transaction_id(), 1);
         db.view(|tx| {
             let users = tx.bucket(b"users")?;
-            assert_eq!(users.get(b"one"), Some(&[1, 2, 3, 4][..]));
-            assert_eq!(users.get(b"two"), Some(&[5, 6][..]));
+            assert_eq!(
+                users.get_kv(b"one").map(|pair| pair.value()),
+                Some(&[1, 2, 3, 4][..])
+            );
+            assert_eq!(
+                users.get_kv(b"two").map(|pair| pair.value()),
+                Some(&[5, 6][..])
+            );
             Ok(())
         })?;
     }
     let reopened = Database::open(&file.0)?;
     assert_eq!(reopened.transaction_id(), 1);
     reopened.view(|tx| {
-        assert_eq!(tx.bucket(b"users")?.get(b"one"), Some(&[1, 2, 3, 4][..]));
+        assert_eq!(
+            tx.bucket(b"users")?.get_kv(b"one").map(|pair| pair.value()),
+            Some(&[1, 2, 3, 4][..])
+        );
         Ok(())
     })
 }
@@ -75,10 +84,17 @@ fn replaces_deletes_and_recreates_data() -> Result<()> {
     })?;
     db.update(|tx| {
         tx.put("items", "key", "new")?;
-        tx.delete("items", "missing")
+        assert!(matches!(
+            tx.delete("items", "missing"),
+            Err(Error::KeyValueMissing)
+        ));
+        Ok(())
     })?;
     db.view(|tx| {
-        assert_eq!(tx.bucket(b"items")?.get(b"key"), Some(&b"new"[..]));
+        assert_eq!(
+            tx.bucket(b"items")?.get_kv(b"key").map(|pair| pair.value()),
+            Some(&b"new"[..])
+        );
         Ok(())
     })?;
     db.update(|tx| tx.delete_bucket("items"))?;
@@ -89,7 +105,10 @@ fn replaces_deletes_and_recreates_data() -> Result<()> {
     db.view(|tx| {
         let items = tx.bucket(b"items")?;
         assert_eq!(items.get(b"key"), None);
-        assert_eq!(items.get(b"fresh"), Some(&b"value"[..]));
+        assert_eq!(
+            items.get_kv(b"fresh").map(|pair| pair.value()),
+            Some(&b"value"[..])
+        );
         Ok(())
     })
 }
@@ -114,7 +133,10 @@ fn discards_a_torn_trailing_transaction() -> Result<()> {
     let recovered = Database::open(&file.0)?;
     assert_eq!(fs::metadata(&file.0)?.len(), valid_len);
     recovered.view(|tx| {
-        assert_eq!(tx.bucket(b"safe")?.get(b"key"), Some(&b"value"[..]));
+        assert_eq!(
+            tx.bucket(b"safe")?.get_kv(b"key").map(|pair| pair.value()),
+            Some(&b"value"[..])
+        );
         Ok(())
     })
 }

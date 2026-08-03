@@ -25,7 +25,7 @@ fn main() -> Result<(), Error> {
         let bucket = tx.bucket(b"bench")?;
         for number in 0..ITEMS {
             assert_eq!(
-                bucket.get(&number.to_le_bytes()),
+                bucket.get_kv(number.to_le_bytes()).map(|pair| pair.value()),
                 Some(&number.to_le_bytes()[..])
             );
         }

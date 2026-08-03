@@ -17,7 +17,7 @@ fn main() -> Result<(), Error> {
         let names = tx.bucket(b"names")?;
         println!(
             "Kanan {}",
-            String::from_utf8_lossy(names.get(b"Kanan").unwrap())
+            String::from_utf8_lossy(names.get_kv(b"Kanan").unwrap().value())
         );
         Ok(())
     })?;

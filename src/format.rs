@@ -8,7 +8,7 @@ pub(crate) const RECORD_HEADER_LEN: usize = 16;
 const FILE_MAGIC: &[u8; 8] = b"INSPACE\0";
 const TX_MAGIC: &[u8; 8] = b"INSTXN01";
 const END_MAGIC: &[u8; 8] = b"INSEND01";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 pub(crate) const CREATE_BUCKET: u8 = 1;
 pub(crate) const DELETE_BUCKET: u8 = 2;

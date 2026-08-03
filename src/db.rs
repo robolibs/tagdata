@@ -1,16 +1,18 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
+use std::ops::{Bound, RangeBounds};
 use std::path::Path;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use fs4::FileExt;
 use memmap2::{Mmap, MmapOptions};
 
 use crate::format::{
     CREATE_BUCKET, DELETE, DELETE_BUCKET, FILE_HEADER_LEN, Operation, PUT, Record,
     encode_transaction, file_header, parse_transaction, validate_file_header,
 };
-use crate::{Error, Result};
+use crate::{BucketName, Cursor, Data, Error, KVPair, Range, Result};
 
 #[derive(Clone, Copy, Debug)]
 struct Slice {
@@ -40,7 +42,12 @@ struct State {
 }
 
 /// A single-file, memory-mapped database.
+#[derive(Clone)]
 pub struct Database {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
     file: File,
     state: RwLock<State>,
 }
@@ -54,6 +61,7 @@ impl Database {
             .create(true)
             .truncate(false)
             .open(path)?;
+        FileExt::lock(&file)?;
         if file.metadata()?.len() == 0 {
             file.write_all(&file_header())?;
             file.sync_data()?;
@@ -85,8 +93,10 @@ impl Database {
             state = repaired;
         }
         Ok(Self {
-            file,
-            state: RwLock::new(state),
+            inner: Arc::new(Inner {
+                file,
+                state: RwLock::new(state),
+            }),
         })
     }
 
@@ -119,11 +129,11 @@ impl Database {
         let txid = state.txid.checked_add(1).ok_or(Error::TooLarge)?;
         let encoded = encode_transaction(txid, &tx.operations)?;
         let start = state.valid_len;
-        (&self.file).seek(SeekFrom::Start(start as u64))?;
-        (&self.file).write_all(&encoded)?;
-        self.file.sync_data()?;
+        (&self.inner.file).seek(SeekFrom::Start(start as u64))?;
+        (&self.inner.file).write_all(&encoded)?;
+        self.inner.file.sync_data()?;
 
-        let new_mmap = map(&self.file)?;
+        let new_mmap = map(&self.inner.file)?;
         let parsed = parse_transaction(&new_mmap, start)?
             .ok_or(Error::Corrupt("committed transaction is incomplete"))?;
         state.mmap = new_mmap;
@@ -139,13 +149,15 @@ impl Database {
     }
 
     fn read_state(&self) -> RwLockReadGuard<'_, State> {
-        self.state
+        self.inner
+            .state
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn write_state(&self) -> RwLockWriteGuard<'_, State> {
-        self.state
+        self.inner
+            .state
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -159,30 +171,120 @@ pub struct ReadTransaction<'db> {
 impl ReadTransaction<'_> {
     /// Opens a bucket by name.
     pub fn bucket<'tx>(&'tx self, name: &[u8]) -> Result<Bucket<'tx>> {
-        let name = find_bucket(&self.state, name).ok_or(Error::BucketNotFound)?;
+        let path = root_path(name)?;
+        find_bucket(&self.state, &path).ok_or(Error::BucketNotFound)?;
         Ok(Bucket {
             state: &self.state,
-            name,
+            path,
         })
+    }
+
+    pub fn buckets(&self) -> impl Iterator<Item = (BucketName<'_>, Bucket<'_>)> {
+        direct_buckets(&self.state, &[]).into_iter()
     }
 }
 
 /// A read-only view of a bucket.
 pub struct Bucket<'tx> {
     state: &'tx State,
-    name: Slice,
+    path: Vec<u8>,
 }
 
-impl Bucket<'_> {
-    /// Gets a value without copying it out of the memory map.
-    pub fn get(&self, key: &[u8]) -> Option<&[u8]> {
-        find_entry(self.state, self.name.get(&self.state.mmap), key)
-            .map(|entry| entry.value.get(&self.state.mmap))
+impl<'tx> Bucket<'tx> {
+    /// Gets an entry without copying it out of the memory map.
+    pub fn get(&self, key: impl AsRef<[u8]>) -> Option<Data<'tx>> {
+        let key = key.as_ref();
+        let child = child_path(&self.path, key).ok()?;
+        if let Some(stored) = find_bucket(self.state, &child) {
+            let path = stored.get(&self.state.mmap);
+            return Some(Data::Bucket(BucketName::new(path_name(path)?)));
+        }
+        self.get_kv(key).map(Data::KeyValue)
+    }
+
+    pub fn get_kv(&self, key: impl AsRef<[u8]>) -> Option<KVPair<'tx>> {
+        find_entry(self.state, &self.path, key.as_ref()).map(|entry| {
+            KVPair::new(
+                entry.key.get(&self.state.mmap),
+                entry.value.get(&self.state.mmap),
+            )
+        })
     }
 
     /// Returns true when this bucket contains `key`.
     pub fn contains_key(&self, key: &[u8]) -> bool {
         self.get(key).is_some()
+    }
+
+    pub fn cursor(&self) -> Cursor<'tx> {
+        let mut items = Vec::new();
+        for (name, _) in direct_buckets(self.state, &self.path) {
+            items.push(Data::Bucket(name));
+        }
+        for entries in self.state.entries.values() {
+            for entry in entries {
+                if entry.bucket.get(&self.state.mmap) == self.path {
+                    items.push(Data::KeyValue(KVPair::new(
+                        entry.key.get(&self.state.mmap),
+                        entry.value.get(&self.state.mmap),
+                    )));
+                }
+            }
+        }
+        Cursor::new(items)
+    }
+
+    pub fn get_bucket(&self, name: impl AsRef<[u8]>) -> Result<Bucket<'tx>> {
+        let path = child_path(&self.path, name.as_ref())?;
+        find_bucket(self.state, &path).ok_or(Error::BucketNotFound)?;
+        Ok(Bucket {
+            state: self.state,
+            path,
+        })
+    }
+
+    pub fn buckets(&self) -> impl Iterator<Item = (BucketName<'tx>, Bucket<'tx>)> {
+        direct_buckets(self.state, &self.path).into_iter()
+    }
+
+    pub fn kv_pairs(&self) -> impl Iterator<Item = KVPair<'tx>> {
+        self.cursor().filter_map(|entry| match entry {
+            Data::KeyValue(pair) => Some(pair),
+            Data::Bucket(_) => None,
+        })
+    }
+
+    pub fn range<'a, R>(&self, bounds: R) -> Range<'tx>
+    where
+        R: RangeBounds<&'a [u8]>,
+    {
+        let items = self
+            .cursor()
+            .filter(|entry| {
+                let key = entry.key();
+                let after_start = match bounds.start_bound() {
+                    Bound::Included(start) => key >= *start,
+                    Bound::Excluded(start) => key > *start,
+                    Bound::Unbounded => true,
+                };
+                let before_end = match bounds.end_bound() {
+                    Bound::Included(end) => key <= *end,
+                    Bound::Excluded(end) => key < *end,
+                    Bound::Unbounded => true,
+                };
+                after_start && before_end
+            })
+            .collect();
+        Range::new(items)
+    }
+}
+
+impl<'tx> IntoIterator for Bucket<'tx> {
+    type Item = Data<'tx>;
+    type IntoIter = Cursor<'tx>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.cursor()
     }
 }
 
@@ -193,29 +295,37 @@ pub struct WriteTransaction<'db> {
     bucket_changes: HashMap<Vec<u8>, bool>,
 }
 
-impl WriteTransaction<'_> {
+impl<'db> WriteTransaction<'db> {
     /// Creates a bucket.
-    pub fn create_bucket(&mut self, name: impl AsRef<[u8]>) -> Result<()> {
-        let name = name.as_ref();
-        if self.bucket_will_exist(name) {
+    pub fn create_bucket(&mut self, name: impl AsRef<[u8]>) -> Result<WriteBucket<'_, 'db>> {
+        let path = root_path(name.as_ref())?;
+        if self.bucket_will_exist(&path) {
             return Err(Error::BucketExists);
         }
         self.operations
-            .push((CREATE_BUCKET, name.to_vec(), Vec::new(), Vec::new()));
-        self.bucket_changes.insert(name.to_vec(), true);
-        Ok(())
+            .push((CREATE_BUCKET, path.clone(), Vec::new(), Vec::new()));
+        self.bucket_changes.insert(path.clone(), true);
+        Ok(WriteBucket { tx: self, path })
     }
 
     /// Deletes a bucket and all of its keys.
     pub fn delete_bucket(&mut self, name: impl AsRef<[u8]>) -> Result<()> {
-        let name = name.as_ref();
-        if !self.bucket_will_exist(name) {
+        let path = root_path(name.as_ref())?;
+        if !self.bucket_will_exist(&path) {
             return Err(Error::BucketNotFound);
         }
         self.operations
-            .push((DELETE_BUCKET, name.to_vec(), Vec::new(), Vec::new()));
-        self.bucket_changes.insert(name.to_vec(), false);
+            .push((DELETE_BUCKET, path.clone(), Vec::new(), Vec::new()));
+        self.bucket_changes.insert(path, false);
         Ok(())
+    }
+
+    pub fn bucket(&mut self, name: impl AsRef<[u8]>) -> Result<WriteBucket<'_, 'db>> {
+        let path = root_path(name.as_ref())?;
+        if !self.bucket_will_exist(&path) {
+            return Err(Error::BucketNotFound);
+        }
+        Ok(WriteBucket { tx: self, path })
     }
 
     /// Inserts or replaces a key/value pair.
@@ -225,35 +335,148 @@ impl WriteTransaction<'_> {
         key: impl AsRef<[u8]>,
         value: impl AsRef<[u8]>,
     ) -> Result<()> {
-        let bucket = bucket.as_ref();
-        if !self.bucket_will_exist(bucket) {
+        let bucket = root_path(bucket.as_ref())?;
+        if !self.bucket_will_exist(&bucket) {
             return Err(Error::BucketNotFound);
         }
-        self.operations.push((
+        let key = key.as_ref();
+        if self.bucket_will_exist(&child_path(&bucket, key)?) {
+            return Err(Error::IncompatibleValue);
+        }
+        self.operations
+            .push((PUT, bucket, key.to_vec(), value.as_ref().to_vec()));
+        Ok(())
+    }
+
+    /// Deletes a key.
+    pub fn delete(&mut self, bucket: impl AsRef<[u8]>, key: impl AsRef<[u8]>) -> Result<()> {
+        let bucket = root_path(bucket.as_ref())?;
+        if !self.bucket_will_exist(&bucket) {
+            return Err(Error::BucketNotFound);
+        }
+        let key = key.as_ref();
+        if self.bucket_will_exist(&child_path(&bucket, key)?) {
+            return Err(Error::IncompatibleValue);
+        }
+        if !self.key_will_exist(&bucket, key) {
+            return Err(Error::KeyValueMissing);
+        }
+        self.operations
+            .push((DELETE, bucket, key.to_vec(), Vec::new()));
+        Ok(())
+    }
+
+    fn bucket_will_exist(&self, name: &[u8]) -> bool {
+        if let Some(exists) = self.bucket_changes.get(name) {
+            return *exists;
+        }
+        if self
+            .bucket_changes
+            .iter()
+            .any(|(path, exists)| !exists && name.starts_with(path))
+        {
+            return false;
+        }
+        bucket_exists(self.state, name)
+    }
+
+    fn key_will_exist(&self, bucket: &[u8], key: &[u8]) -> bool {
+        for (kind, operation_bucket, operation_key, _) in self.operations.iter().rev() {
+            if *kind == DELETE_BUCKET && bucket.starts_with(operation_bucket) {
+                return false;
+            }
+            if operation_bucket == bucket && operation_key == key {
+                return *kind == PUT;
+            }
+        }
+        find_entry(self.state, bucket, key).is_some()
+    }
+}
+
+pub struct WriteBucket<'tx, 'db> {
+    tx: &'tx mut WriteTransaction<'db>,
+    path: Vec<u8>,
+}
+
+impl<'tx, 'db> WriteBucket<'tx, 'db> {
+    pub fn put(&mut self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<()> {
+        let key = key.as_ref();
+        if self.tx.bucket_will_exist(&child_path(&self.path, key)?) {
+            return Err(Error::IncompatibleValue);
+        }
+        self.tx.operations.push((
             PUT,
-            bucket.to_vec(),
-            key.as_ref().to_vec(),
+            self.path.clone(),
+            key.to_vec(),
             value.as_ref().to_vec(),
         ));
         Ok(())
     }
 
-    /// Deletes a key. Deleting an absent key succeeds.
-    pub fn delete(&mut self, bucket: impl AsRef<[u8]>, key: impl AsRef<[u8]>) -> Result<()> {
-        let bucket = bucket.as_ref();
-        if !self.bucket_will_exist(bucket) {
-            return Err(Error::BucketNotFound);
+    pub fn delete(&mut self, key: impl AsRef<[u8]>) -> Result<()> {
+        let key = key.as_ref();
+        if self.tx.bucket_will_exist(&child_path(&self.path, key)?) {
+            return Err(Error::IncompatibleValue);
         }
-        self.operations
-            .push((DELETE, bucket.to_vec(), key.as_ref().to_vec(), Vec::new()));
+        if !self.tx.key_will_exist(&self.path, key) {
+            return Err(Error::KeyValueMissing);
+        }
+        self.tx
+            .operations
+            .push((DELETE, self.path.clone(), key.to_vec(), Vec::new()));
         Ok(())
     }
 
-    fn bucket_will_exist(&self, name: &[u8]) -> bool {
-        self.bucket_changes
-            .get(name)
-            .copied()
-            .unwrap_or_else(|| bucket_exists(self.state, name))
+    pub fn create_bucket(&mut self, name: impl AsRef<[u8]>) -> Result<WriteBucket<'_, 'db>> {
+        let path = child_path(&self.path, name.as_ref())?;
+        if self.tx.bucket_will_exist(&path) {
+            return Err(Error::BucketExists);
+        }
+        if self.tx.key_will_exist(&self.path, name.as_ref()) {
+            return Err(Error::IncompatibleValue);
+        }
+        self.tx
+            .operations
+            .push((CREATE_BUCKET, path.clone(), Vec::new(), Vec::new()));
+        self.tx.bucket_changes.insert(path.clone(), true);
+        Ok(WriteBucket { tx: self.tx, path })
+    }
+
+    pub fn get_bucket(&mut self, name: impl AsRef<[u8]>) -> Result<WriteBucket<'_, 'db>> {
+        let path = child_path(&self.path, name.as_ref())?;
+        if !self.tx.bucket_will_exist(&path) {
+            if self.tx.key_will_exist(&self.path, name.as_ref()) {
+                return Err(Error::IncompatibleValue);
+            }
+            return Err(Error::BucketNotFound);
+        }
+        Ok(WriteBucket { tx: self.tx, path })
+    }
+
+    pub fn get_or_create_bucket(&mut self, name: impl AsRef<[u8]>) -> Result<WriteBucket<'_, 'db>> {
+        let path = child_path(&self.path, name.as_ref())?;
+        if !self.tx.bucket_will_exist(&path) {
+            if self.tx.key_will_exist(&self.path, name.as_ref()) {
+                return Err(Error::IncompatibleValue);
+            }
+            self.tx
+                .operations
+                .push((CREATE_BUCKET, path.clone(), Vec::new(), Vec::new()));
+            self.tx.bucket_changes.insert(path.clone(), true);
+        }
+        Ok(WriteBucket { tx: self.tx, path })
+    }
+
+    pub fn delete_bucket(&mut self, name: impl AsRef<[u8]>) -> Result<()> {
+        let path = child_path(&self.path, name.as_ref())?;
+        if !self.tx.bucket_will_exist(&path) {
+            return Err(Error::BucketNotFound);
+        }
+        self.tx
+            .operations
+            .push((DELETE_BUCKET, path.clone(), Vec::new(), Vec::new()));
+        self.tx.bucket_changes.insert(path, false);
+        Ok(())
     }
 }
 
@@ -352,10 +575,11 @@ fn insert_bucket(state: &mut State, bucket: Slice) {
 }
 
 fn remove_bucket(state: &mut State, bucket: &[u8]) {
-    if let Some(list) = state.buckets.get_mut(&hash(bucket)) {
-        let mmap = &state.mmap;
-        list.retain(|existing| existing.get(mmap) != bucket);
-    }
+    let mmap = &state.mmap;
+    state.buckets.retain(|_, list| {
+        list.retain(|existing| !existing.get(mmap).starts_with(bucket));
+        !list.is_empty()
+    });
 }
 
 fn insert_entry(state: &mut State, entry: Entry) {
@@ -378,9 +602,68 @@ fn remove_entry(state: &mut State, bucket: &[u8], key: &[u8]) {
 fn remove_bucket_entries(state: &mut State, bucket: &[u8]) {
     let mmap = &state.mmap;
     state.entries.retain(|_, list| {
-        list.retain(|entry| entry.bucket.get(mmap) != bucket);
+        list.retain(|entry| !entry.bucket.get(mmap).starts_with(bucket));
         !list.is_empty()
     });
+}
+
+fn root_path(name: &[u8]) -> Result<Vec<u8>> {
+    child_path(&[], name)
+}
+
+fn child_path(parent: &[u8], name: &[u8]) -> Result<Vec<u8>> {
+    let len = u32::try_from(name.len()).map_err(|_| Error::TooLarge)?;
+    let mut path = Vec::with_capacity(parent.len() + 4 + name.len());
+    path.extend_from_slice(parent);
+    path.extend_from_slice(&len.to_le_bytes());
+    path.extend_from_slice(name);
+    Ok(path)
+}
+
+fn path_name(path: &[u8]) -> Option<&[u8]> {
+    let mut cursor = 0;
+    let mut name = None;
+    while cursor < path.len() {
+        let end = cursor.checked_add(4)?;
+        let len = u32::from_le_bytes(path.get(cursor..end)?.try_into().ok()?) as usize;
+        cursor = end;
+        let end = cursor.checked_add(len)?;
+        name = Some(path.get(cursor..end)?);
+        cursor = end;
+    }
+    name
+}
+
+fn direct_child_name<'a>(path: &'a [u8], parent: &[u8]) -> Option<&'a [u8]> {
+    let suffix = path.strip_prefix(parent)?;
+    if suffix.len() < 4 {
+        return None;
+    }
+    let len = u32::from_le_bytes(suffix[..4].try_into().ok()?) as usize;
+    if suffix.len() != 4 + len {
+        return None;
+    }
+    Some(&suffix[4..])
+}
+
+fn direct_buckets<'a>(state: &'a State, parent: &[u8]) -> Vec<(BucketName<'a>, Bucket<'a>)> {
+    let mut buckets = Vec::new();
+    for paths in state.buckets.values() {
+        for stored in paths {
+            let path = stored.get(&state.mmap);
+            if let Some(name) = direct_child_name(path, parent) {
+                buckets.push((
+                    BucketName::new(name),
+                    Bucket {
+                        state,
+                        path: path.to_vec(),
+                    },
+                ));
+            }
+        }
+    }
+    buckets.sort_unstable_by(|left, right| left.0.name().cmp(right.0.name()));
+    buckets
 }
 
 fn bucket_exists(state: &State, bucket: &[u8]) -> bool {

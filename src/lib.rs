@@ -6,9 +6,14 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+mod cursor;
+mod data;
 mod db;
 mod error;
 mod format;
 
-pub use db::{Bucket, Database, ReadTransaction, WriteTransaction};
+pub use cursor::{Buckets, Cursor, KVPairs, Range, ToBuckets, ToKVPairs};
+pub use data::{BucketName, Data, KVPair};
+pub use db::{Bucket, Database, ReadTransaction, WriteBucket, WriteTransaction};
+pub type DB = Database;
 pub use error::{Error, Result};

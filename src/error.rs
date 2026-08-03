@@ -15,6 +15,10 @@ pub enum Error {
     BucketNotFound,
     /// The requested bucket already exists.
     BucketExists,
+    /// The requested key/value pair does not exist.
+    KeyValueMissing,
+    /// A key/value pair conflicts with a bucket.
+    IncompatibleValue,
     /// A key or bucket name is too large for the on-disk format.
     TooLarge,
 }
@@ -26,6 +30,8 @@ impl fmt::Display for Error {
             Self::Corrupt(reason) => write!(f, "corrupt database: {reason}"),
             Self::BucketNotFound => f.write_str("bucket not found"),
             Self::BucketExists => f.write_str("bucket already exists"),
+            Self::KeyValueMissing => f.write_str("key/value pair not found"),
+            Self::IncompatibleValue => f.write_str("value has an incompatible type"),
             Self::TooLarge => f.write_str("key, value, or transaction is too large"),
         }
     }

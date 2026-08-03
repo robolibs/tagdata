@@ -13,7 +13,9 @@ See [acknowledgments](ACKOLEGMENT.md) for prior work that informed the project.
 - **Crash recovery:** every commit has a transaction ID, payload checksum, and
   validated footer. A torn final commit is discarded when the database reopens.
 - **Fast lookup:** an in-memory, collision-safe hash index points into the mmap.
-- **Buckets:** independent byte-key/byte-value namespaces with create and delete.
+- **Nested buckets:** byte-key/byte-value namespaces can form arbitrary trees.
+- **Ordered traversal:** cursors, key/value iterators, bucket iterators, and ranges.
+- **Single-process ownership:** an exclusive file lock prevents unsafe concurrent opens.
 - **Small dependency surface:** the storage engine only depends on `memmap2`.
 
 ```rust
@@ -30,7 +32,10 @@ fn main() -> Result<(), Error> {
 
     db.view(|tx| {
         let names = tx.bucket(b"names")?;
-        assert_eq!(names.get(b"Kanan"), Some(&b"Jarrus"[..]));
+        assert_eq!(
+            names.get_kv(b"Kanan").map(|pair| pair.value()),
+            Some(&b"Jarrus"[..])
+        );
         Ok(())
     })
 }
@@ -70,7 +75,7 @@ This is a functional first engine. Before a stable 1.0, `inspace` still needs:
 1. page-oriented B+ trees for ordered scans and bounded startup time;
 2. copy-on-write pages plus dual meta pages for large-database commits;
 3. freelist management and online/offline compaction;
-4. process-level file locking and explicit read-only open mode;
+4. explicit read-only open mode and configurable mapping/page behavior;
 5. fuzzing, crash-injection tests, format compatibility tests, and comparative
    database benchmarks.
 
