@@ -105,7 +105,7 @@ impl<'b> InnerBucket<'b> {
         }
     }
 
-    pub(super) fn delete<'a, T: AsRef<[u8]>>(
+    pub(crate) fn delete<'a, T: AsRef<[u8]>>(
         &'a mut self,
         key: T,
     ) -> Result<(Bytes<'b>, Bytes<'b>)> {

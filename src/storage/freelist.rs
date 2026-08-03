@@ -236,7 +236,7 @@ mod tests {
         assert_eq!(freelist.allocate(1), Some(6));
         assert_eq!(
             freelist.free_pages.iter().cloned().collect::<Vec<u64>>(),
-            vec![]
+            Vec::<u64>::new()
         );
         assert_eq!(freelist.allocate(1), None);
     }

@@ -10,6 +10,7 @@ use std::{
 use crate::{
     BucketName,
     bytes::{Bytes, ToBytes},
+    changes::{ChangeOperation, ChangeTracker},
     cursor::{Cursor, Range, ToBuckets, ToKVPairs, search},
     data::{Data, KVPair},
     errors::{Error, Result},
@@ -84,6 +85,8 @@ pub struct Bucket<'b, 'tx: 'b> {
     pub(crate) inner: Rc<RefCell<InnerBucket<'tx>>>,
     pub(crate) freelist: Rc<RefCell<TxFreelist>>,
     pub(crate) writable: bool,
+    pub(crate) path: Vec<Vec<u8>>,
+    pub(crate) changes: Rc<RefCell<ChangeTracker>>,
     pub(crate) _phantom: PhantomData<&'b ()>,
 }
 
@@ -125,11 +128,17 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
         if !self.writable {
             return Err(Error::ReadOnlyTx);
         }
+        let key = key.to_bytes();
+        let change_key = key.as_ref().to_vec();
         let mut b = self.inner.borrow_mut();
         if b.deleted {
             panic!("Cannot put data into a deleted bucket.");
         }
-        Ok(b.put(key, value)?.map(|v| v.into()))
+        let previous = b.put(key, value)?.map(|v| v.into());
+        self.changes
+            .borrow_mut()
+            .record(&self.path, &change_key, ChangeOperation::Put);
+        Ok(previous)
     }
 
     pub fn get<'a, T: AsRef<[u8]>>(&'a self, key: T) -> Option<Data<'b, 'tx>> {
@@ -178,11 +187,16 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
         if !self.writable {
             return Err(Error::ReadOnlyTx);
         }
+        let change_key = key.as_ref().to_vec();
         let mut b = self.inner.borrow_mut();
         if b.deleted {
             panic!("Cannot delete data from a deleted bucket.");
         }
-        Ok(b.delete(key)?.into())
+        let previous = b.delete(key)?.into();
+        self.changes
+            .borrow_mut()
+            .record(&self.path, &change_key, ChangeOperation::Delete);
+        Ok(previous)
     }
 
     /// Gets an already created bucket.
@@ -214,15 +228,20 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
     /// # }
     /// ```
     pub fn get_bucket<'a, T: ToBytes<'tx>>(&'a self, name: T) -> Result<Bucket<'b, 'tx>> {
+        let name = name.to_bytes();
+        let mut path = self.path.clone();
+        path.push(name.as_ref().to_vec());
         let mut b = self.inner.borrow_mut();
         if b.deleted {
             panic!("Cannot get bucket from a deleted bucket.");
         }
-        let inner = b.get_bucket(name)?;
+        let inner = b.get_bucket(&name)?;
         Ok(Bucket {
             inner,
             freelist: self.freelist.clone(),
             writable: self.writable,
+            path,
+            changes: self.changes.clone(),
             _phantom: PhantomData,
         })
     }
@@ -259,15 +278,24 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
         if !self.writable {
             return Err(Error::ReadOnlyTx);
         }
+        let name = name.to_bytes();
+        let change_key = name.as_ref().to_vec();
+        let mut path = self.path.clone();
+        path.push(change_key.clone());
         let mut b = self.inner.borrow_mut();
         if b.deleted {
             panic!("Cannot create bucket in a deleted bucket.");
         }
         let inner = b.create_bucket(name)?;
+        self.changes
+            .borrow_mut()
+            .record(&self.path, &change_key, ChangeOperation::BucketCreate);
         Ok(Bucket {
             inner,
             freelist: self.freelist.clone(),
             writable: self.writable,
+            path,
+            changes: self.changes.clone(),
             _phantom: PhantomData,
         })
     }
@@ -304,15 +332,29 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
         if !self.writable {
             return Err(Error::ReadOnlyTx);
         }
+        let name = name.to_bytes();
+        let change_key = name.as_ref().to_vec();
+        let mut path = self.path.clone();
+        path.push(change_key.clone());
         let mut b = self.inner.borrow_mut();
         if b.deleted {
             panic!("Cannot get or create bucket from a deleted bucket.");
         }
+        let existed = b.get_bucket(&name).is_ok();
         let inner = b.get_or_create_bucket(name)?;
+        if !existed {
+            self.changes.borrow_mut().record(
+                &self.path,
+                &change_key,
+                ChangeOperation::BucketCreate,
+            );
+        }
         Ok(Bucket {
             inner,
             freelist: self.freelist.clone(),
             writable: self.writable,
+            path,
+            changes: self.changes.clone(),
             _phantom: PhantomData,
         })
     }
@@ -348,12 +390,18 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
             return Err(Error::ReadOnlyTx);
         }
 
+        let key = key.to_bytes();
+        let change_key = key.as_ref().to_vec();
         let mut freelist = self.freelist.borrow_mut();
         let mut b = self.inner.borrow_mut();
         if b.deleted {
             panic!("Cannot delete bucket from a deleted bucket.");
         }
-        b.delete_bucket(key, &mut freelist)
+        b.delete_bucket(key, &mut freelist)?;
+        self.changes
+            .borrow_mut()
+            .record(&self.path, &change_key, ChangeOperation::BucketDelete);
+        Ok(())
     }
 
     /// Get a cursor to iterate over the bucket.

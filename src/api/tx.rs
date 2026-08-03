@@ -14,6 +14,7 @@ use crate::{
     BucketName,
     bucket::{Bucket, BucketMeta, InnerBucket},
     bytes::ToBytes,
+    changes::{ChangeOperation, ChangeTracker},
     coordination::{GateGuard, ReaderRegistration},
     cursor::ToBuckets,
     db::{DB, MIN_ALLOC_SIZE},
@@ -159,6 +160,7 @@ pub(crate) struct TxInner<'tx> {
     pub(crate) root: Rc<RefCell<InnerBucket<'tx>>>,
     pub(crate) meta: Meta,
     pub(crate) freelist: Rc<RefCell<TxFreelist>>,
+    pub(crate) changes: Rc<RefCell<ChangeTracker>>,
     pages: Pages,
     num_freelist_pages: u64,
 }
@@ -228,6 +230,7 @@ impl<'tx> Tx<'tx> {
             )
         };
         let freelist = Rc::new(RefCell::new(TxFreelist::new(meta.clone(), freelist)));
+        let changes = ChangeTracker::shared(writable);
 
         let data = db.inner.data.lock()?.clone();
         let pages = Pages::new(data, db.inner.pagesize);
@@ -240,6 +243,7 @@ impl<'tx> Tx<'tx> {
             root,
             meta,
             freelist,
+            changes,
             num_freelist_pages,
             pages,
         };
@@ -262,12 +266,16 @@ impl<'tx> Tx<'tx> {
     /// In a read-only transaction, you will get an error when trying to use any of the bucket's methods that modify data.    
     pub fn get_bucket<'b, T: ToBytes<'tx>>(&'b self, name: T) -> Result<Bucket<'b, 'tx>> {
         let tx = self.inner.borrow();
+        let name = name.to_bytes();
+        let path = vec![name.as_ref().to_vec()];
         let mut root = tx.root.borrow_mut();
-        let inner = root.get_bucket(name)?;
+        let inner = root.get_bucket(&name)?;
         Ok(Bucket {
             inner,
             freelist: tx.freelist.clone(),
             writable: tx.lock.writable(),
+            path,
+            changes: tx.changes.clone(),
             _phantom: PhantomData,
         })
     }
@@ -284,12 +292,19 @@ impl<'tx> Tx<'tx> {
         if !tx.lock.writable() {
             return Err(Error::ReadOnlyTx);
         }
+        let name = name.to_bytes();
+        let key = name.as_ref().to_vec();
         let mut root = tx.root.borrow_mut();
         let inner = root.create_bucket(name)?;
+        tx.changes
+            .borrow_mut()
+            .record(&[], &key, ChangeOperation::BucketCreate);
         Ok(Bucket {
             inner,
             freelist: tx.freelist.clone(),
             writable: true,
+            path: vec![key],
+            changes: tx.changes.clone(),
             _phantom: PhantomData,
         })
     }
@@ -306,12 +321,22 @@ impl<'tx> Tx<'tx> {
         if !tx.lock.writable() {
             return Err(Error::ReadOnlyTx);
         }
+        let name = name.to_bytes();
+        let key = name.as_ref().to_vec();
         let mut root = tx.root.borrow_mut();
+        let existed = root.get_bucket(&name).is_ok();
         let inner = root.get_or_create_bucket(name)?;
+        if !existed {
+            tx.changes
+                .borrow_mut()
+                .record(&[], &key, ChangeOperation::BucketCreate);
+        }
         Ok(Bucket {
             inner,
             freelist: tx.freelist.clone(),
             writable: true,
+            path: vec![key],
+            changes: tx.changes.clone(),
             _phantom: PhantomData,
         })
     }
@@ -328,10 +353,16 @@ impl<'tx> Tx<'tx> {
         if !tx.lock.writable() {
             return Err(Error::ReadOnlyTx);
         }
+        let key = key.to_bytes();
+        let change_key = key.as_ref().to_vec();
         let freelist = tx.freelist.clone();
         let mut freelist = freelist.borrow_mut();
         let mut root = tx.root.borrow_mut();
-        root.delete_bucket(key, &mut freelist)
+        root.delete_bucket(key, &mut freelist)?;
+        tx.changes
+            .borrow_mut()
+            .record(&[], &change_key, ChangeOperation::BucketDelete);
+        Ok(())
     }
 
     /// Iterator over the root level buckets
@@ -341,6 +372,8 @@ impl<'tx> Tx<'tx> {
             inner: tx.root.clone(),
             freelist: tx.freelist.clone(),
             writable: tx.lock.writable(),
+            path: Vec::new(),
+            changes: tx.changes.clone(),
             _phantom: PhantomData,
         };
         bucket.cursor().to_buckets()
@@ -473,6 +506,8 @@ impl<'tx> TxInner<'tx> {
                 .inner
                 .bytes_written
                 .fetch_add(written, std::sync::atomic::Ordering::Relaxed);
+            let changes = self.changes.borrow_mut().finish(self.meta.tx_id);
+            self.db.inner.watches.publish(changes);
             Ok(())
         } else {
             unreachable!()
@@ -668,7 +703,7 @@ mod tests {
                         let inner = tx.inner.borrow_mut();
                         assert_eq!(inner.meta.tx_id, 1);
                         let freelist = inner.freelist.borrow();
-                        assert_eq!(freelist.inner.pages(), vec![]);
+                        assert_eq!(freelist.inner.pages(), Vec::<u64>::new());
                     }
                     let b = tx.create_bucket("abc")?;
                     b.put("123", "456")?;
@@ -728,7 +763,7 @@ mod tests {
             assert!(page.id == 10);
             assert!(page.overflow == 0);
             assert_eq!(freelist.meta.num_pages, 11);
-            assert_eq!(freelist.inner.pages(), vec![]);
+            assert_eq!(freelist.inner.pages(), Vec::<u64>::new());
         }
         Ok(())
     }

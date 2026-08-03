@@ -16,6 +16,7 @@ use page_size::get as get_page_size;
 
 use crate::{
     bucket::BucketMeta,
+    changes::WatchHub,
     coordination::Coordination,
     errors::{Error, Result},
     freelist::Freelist,
@@ -371,6 +372,7 @@ pub(crate) struct DBInner {
     pub(crate) committed_transactions: AtomicU64,
     pub(crate) bytes_written: AtomicU64,
     pub(crate) path: PathBuf,
+    pub(crate) watches: WatchHub,
 }
 
 impl DBInner {
@@ -398,6 +400,7 @@ impl DBInner {
             committed_transactions: AtomicU64::new(0),
             bytes_written: AtomicU64::new(0),
             path: path.to_path_buf(),
+            watches: WatchHub::new(),
         };
 
         {

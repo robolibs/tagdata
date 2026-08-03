@@ -8,6 +8,7 @@ use std::{
 use crate::{
     BucketName, KVPair,
     bucket::{Bucket, InnerBucket},
+    changes::ChangeTracker,
     data::Data,
     freelist::TxFreelist,
     page::PageID,
@@ -59,6 +60,8 @@ pub struct Cursor<'b, 'tx> {
     bucket: Rc<RefCell<InnerBucket<'tx>>>,
     freelist: Rc<RefCell<TxFreelist>>,
     writable: bool,
+    path: Vec<Vec<u8>>,
+    changes: Rc<RefCell<ChangeTracker>>,
     stack: Vec<SearchPath>,
     next_called: bool,
     _phantom: PhantomData<&'b ()>,
@@ -70,6 +73,8 @@ impl<'b, 'tx> Cursor<'b, 'tx> {
             bucket: b.inner.clone(),
             freelist: b.freelist.clone(),
             writable: b.writable,
+            path: b.path.clone(),
+            changes: b.changes.clone(),
             stack: Vec::new(),
             next_called: false,
             _phantom: PhantomData,
@@ -258,6 +263,8 @@ pub struct Buckets<'b, 'tx, I> {
     pub(crate) bucket: Rc<RefCell<InnerBucket<'tx>>>,
     pub(crate) freelist: Rc<RefCell<TxFreelist>>,
     pub(crate) writable: bool,
+    pub(crate) path: Vec<Vec<u8>>,
+    pub(crate) changes: Rc<RefCell<ChangeTracker>>,
     pub(crate) _phantom: PhantomData<&'b ()>,
 }
 
@@ -272,12 +279,16 @@ where
             if let Data::Bucket(bucket_data) = data {
                 let mut b = self.bucket.borrow_mut();
                 if let Ok(r) = b.get_bucket(&bucket_data) {
+                    let mut path = self.path.clone();
+                    path.push(bucket_data.name().to_vec());
                     return Some((
                         bucket_data,
                         Bucket {
                             writable: self.writable,
                             freelist: self.freelist.clone(),
                             inner: r,
+                            path,
+                            changes: self.changes.clone(),
                             _phantom: PhantomData,
                         },
                     ));
@@ -299,11 +310,15 @@ impl<'b, 'tx: 'b> ToBuckets<'b, 'tx> for Cursor<'b, 'tx> {
         let freelist = self.freelist.clone();
         let bucket = self.bucket.clone();
         let writable = self.writable;
+        let path = self.path.clone();
+        let changes = self.changes.clone();
         Buckets {
             i: self,
             bucket,
             freelist,
             writable,
+            path,
+            changes,
             _phantom: PhantomData,
         }
     }
@@ -317,11 +332,15 @@ where
         let freelist = self.c.freelist.clone();
         let bucket = self.c.bucket.clone();
         let writable = self.c.writable;
+        let path = self.c.path.clone();
+        let changes = self.c.changes.clone();
         Buckets {
             i: self,
             bucket,
             freelist,
             writable,
+            path,
+            changes,
             _phantom: PhantomData,
         }
     }

@@ -79,6 +79,25 @@ in the containing raw bucket (or use versioned bucket names), migrate values in
 a write transaction, and never change a live bucket's codec without rewriting
 all entries. Raw and typed views may coexist when they follow the same schema.
 
+## Change watches and TTL
+
+`DB::watch(capacity)` receives ordered, process-local `ChangeSet` values after a
+transaction is durably committed. Sets preserve transaction boundaries and IDs
+and contain bucket paths, keys, and operation types—not values. Delivery is
+best-effort with no durable replay or cross-process transport. Commit never
+waits for a watcher; a subscriber whose bounded queue fills is disconnected.
+Large transactions cap tracking at 4,096 changes or 4 MiB and set `truncated`.
+
+`Bucket::put_with_ttl` persists a Unix-millisecond expiration in a reserved
+nested index. `get_live` applies the current wall clock, while `get_live_at`
+accepts an explicit time. Cleanup is deliberately lazy and bounded through
+`purge_expired`; no runtime or background thread is required. Raw `get` ignores
+TTL and expired bytes remain visible to raw access until cleanup. Wall-clock
+jumps affect expiry, and ordinary `put` does not clear an existing TTL—call
+`clear_ttl` when making a key persistent. Backup and compaction preserve TTL
+indexes. See `docs/decisions/0002-changes-ttl-watches.md` for delivery and time
+semantics.
+
 ## Storage layout
 
 The format uses fixed-size pages:
