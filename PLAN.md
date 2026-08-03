@@ -377,7 +377,7 @@ costs or transaction boundaries.
 | 11 | Operator CLI, diagnostics, and salvage | DONE | Phases 4-5 and 10 |
 | 12 | Scalable TTL and precise page reclamation | DONE | Phases 3 and 8 |
 | 13 | Optional durable change journal | DONE | Phases 8 and 12 |
-| 14 | Publication and compatibility contract | TODO | Phases 9-13 |
+| 14 | Publication and compatibility contract | DONE | Phases 9-13 |
 
 ## Phase 9: Reusable application API
 
