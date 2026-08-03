@@ -372,7 +372,7 @@ costs or transaction boundaries.
 
 | Phase | Work | Status | Depends on |
 |---|---|---|---|
-| 9 | Reusable application API | TODO | Phases 6-8 |
+| 9 | Reusable application API | DONE | Phases 6-8 |
 | 10 | Portability, contention, and capacity controls | TODO | Phase 9 |
 | 11 | Operator CLI, diagnostics, and salvage | TODO | Phases 4-5 and 10 |
 | 12 | Scalable TTL and precise page reclamation | TODO | Phases 3 and 8 |
