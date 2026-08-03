@@ -21,6 +21,8 @@ See [acknowledgments](ACKOLEGMENT.md) for prior work that informed the project.
   and shared safely by multiple reader processes.
 - **Runtime statistics:** file, page, freelist, transaction, and reader state is
   available through `DB::stats()`.
+- **Operational snapshots:** validated backups and compact copies can be written
+  without stopping concurrent writers.
 
 ```rust
 use inspace::{DB, Error};
@@ -66,6 +68,10 @@ writes the database. A read-only handle rejects writable transactions.
 Writable handles coordinate through a sibling `.inspace` directory. Reader
 registrations are removed automatically, including stale registrations left by
 terminated processes. Keep that directory beside the database while it is live.
+
+Use `DB::backup_to` for an atomically published snapshot, `DB::backup_writer` to
+stream a snapshot, and `DB::compact_to` to rewrite only live data into a smaller
+file. Maintenance operations never replace the source database.
 
 ## Commands
 

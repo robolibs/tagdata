@@ -24,7 +24,7 @@ without weakening its compact byte-oriented API or zero-copy read path.
 | 1 | Statistics and diagnostics | DONE | Phase 0 |
 | 2 | Genuine read-only opening | DONE | Phase 0 |
 | 3 | Multi-process readers and one writer | DONE | Phases 1-2 |
-| 4 | Snapshot backup and offline compaction | TODO | Phase 3 |
+| 4 | Snapshot backup and offline compaction | DONE | Phase 3 |
 | 5 | Versioned pages and checksums | TODO | Phase 0 |
 | 6 | Transaction ergonomics and atomic operations | TODO | Phase 0 |
 | 7 | Optional typed codec layer | TODO | Phase 6 |

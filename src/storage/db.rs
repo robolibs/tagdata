@@ -3,7 +3,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::{
     fs::{File, OpenOptions as FileOpenOptions},
     io::Write,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -301,6 +301,7 @@ pub(crate) struct DBInner {
     pub(crate) pagesize: u64,
     pub(crate) committed_transactions: AtomicU64,
     pub(crate) bytes_written: AtomicU64,
+    pub(crate) path: PathBuf,
 }
 
 impl DBInner {
@@ -327,6 +328,7 @@ impl DBInner {
             flags,
             committed_transactions: AtomicU64::new(0),
             bytes_written: AtomicU64::new(0),
+            path: path.to_path_buf(),
         };
 
         {
