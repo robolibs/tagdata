@@ -145,7 +145,8 @@ cargo run --example verify -- data.db
 cargo run --example verify -- data.db 8192
 ```
 
-`make benchmark` reports full-verification time and compares the selected
+`make benchmark` reports full-verification time, v3 long-reader/write-churn
+growth, deadline-index TTL cleanup latency, and compares the selected
 SHA3-256 checksum with FNV-1a-64 over the same file. SHA3-256 is used on disk for
 substantially stronger corruption detection; the benchmark keeps that cost
 visible rather than silently choosing the faster non-cryptographic hash.
