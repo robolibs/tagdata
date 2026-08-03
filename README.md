@@ -47,6 +47,18 @@ fn main() -> Result<(), Error> {
 }
 ```
 
+New code can use `read_tx()`, `write_tx()`, and nonblocking `try_write_tx()`
+instead of the compatibility `tx(bool)` method. `view` and `update` scope a
+synchronous closure; `update` commits only when the closure returns `Ok` and
+rolls back on errors or panics. Transactions are synchronous and must not cross
+an async suspension point.
+
+Writable buckets provide serializable `put_if_absent`, `compare_exchange`, and
+`delete_if_value` operations. Their owned `AtomicResult` reports whether the
+mutation applied plus the observed and resulting values. For
+`compare_exchange`, an expected value of `None` matches a missing key. A missing
+key is a conflict for `delete_if_value`.
+
 ## Storage layout
 
 The format uses fixed-size pages:

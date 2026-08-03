@@ -26,7 +26,7 @@ without weakening its compact byte-oriented API or zero-copy read path.
 | 3 | Multi-process readers and one writer | DONE | Phases 1-2 |
 | 4 | Snapshot backup and offline compaction | DONE | Phase 3 |
 | 5 | Versioned pages and checksums | DONE | Phase 0 |
-| 6 | Transaction ergonomics and atomic operations | TODO | Phase 0 |
+| 6 | Transaction ergonomics and atomic operations | DONE | Phase 0 |
 | 7 | Optional typed codec layer | TODO | Phase 6 |
 | 8 | Change tracking, TTL, and watches | TODO | Phases 3 and 6 |
 

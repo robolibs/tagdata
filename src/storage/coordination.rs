@@ -3,7 +3,7 @@ use std::{
     fs::{File, OpenOptions},
     path::{Path, PathBuf},
     sync::{
-        Mutex, MutexGuard,
+        Mutex, MutexGuard, TryLockError,
         atomic::{AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -47,6 +47,19 @@ impl Coordination {
         let gate = self.gate.lock()?;
         FileExt::lock_exclusive(&*gate)?;
         Ok(GateGuard { gate })
+    }
+
+    pub(crate) fn try_exclusive_gate(&self) -> Result<Option<GateGuard<'_>>> {
+        let gate = match self.gate.try_lock() {
+            Ok(gate) => gate,
+            Err(TryLockError::WouldBlock) => return Ok(None),
+            Err(TryLockError::Poisoned(_)) => return Err(Error::Sync("lock poisoned")),
+        };
+        match FileExt::try_lock_exclusive(&*gate) {
+            Ok(()) => Ok(Some(GateGuard { gate })),
+            Err(error) if error.kind() == fs4::lock_contended_error().kind() => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 
     pub(crate) fn register(&self, tx_id: u64) -> Result<ReaderRegistration> {

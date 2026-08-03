@@ -47,6 +47,25 @@ impl<'tx> WriteGuard<'tx> {
             }
         }
     }
+
+    fn try_new(db: &'tx DB) -> Result<Option<Self>> {
+        let coordination = db.inner.coordination.as_ref().unwrap();
+        let Some(gate) = coordination.try_exclusive_gate()? else {
+            return Ok(None);
+        };
+        let file = match db.inner.file.try_lock() {
+            Ok(file) => file,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(Error::Sync("lock poisoned"));
+            }
+        };
+        match FileExt::try_lock_exclusive(&*file) {
+            Ok(()) => Ok(Some(Self { file, _gate: gate })),
+            Err(error) if error.kind() == fs4::lock_contended_error().kind() => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
 }
 
 impl Drop for WriteGuard<'_> {
@@ -146,12 +165,27 @@ pub(crate) struct TxInner<'tx> {
 
 impl<'tx> Tx<'tx> {
     pub(crate) fn new(db: &'tx DB, writable: bool) -> Result<Tx<'tx>> {
+        Ok(Self::new_impl(db, writable, false)?.unwrap())
+    }
+
+    pub(crate) fn try_new_writable(db: &'tx DB) -> Result<Option<Tx<'tx>>> {
+        Self::new_impl(db, true, true)
+    }
+
+    fn new_impl(db: &'tx DB, writable: bool, try_write: bool) -> Result<Option<Tx<'tx>>> {
         if writable && db.inner.flags.read_only {
             return Err(Error::ReadOnlyDB);
         }
 
         let (lock, meta, freelist) = if writable {
-            let lock = WriteGuard::new(db)?;
+            let lock = if try_write {
+                let Some(lock) = WriteGuard::try_new(db)? else {
+                    return Ok(None);
+                };
+                lock
+            } else {
+                WriteGuard::new(db)?
+            };
             db.inner.refresh(&lock.file)?;
             db.inner.reload_freelist()?;
             let coordination = db.inner.coordination.as_ref().unwrap();
@@ -209,9 +243,9 @@ impl<'tx> Tx<'tx> {
             num_freelist_pages,
             pages,
         };
-        Ok(Tx {
+        Ok(Some(Tx {
             inner: RefCell::new(inner),
-        })
+        }))
     }
 
     pub(crate) fn writable(&self) -> bool {

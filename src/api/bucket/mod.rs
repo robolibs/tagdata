@@ -19,7 +19,9 @@ use crate::{
     page_node::{PageNode, PageNodeID},
 };
 
+mod atomic;
 mod inner;
+pub use atomic::AtomicResult;
 pub(crate) use inner::{BucketMeta, InnerBucket, META_SIZE};
 
 #[cfg(test)]

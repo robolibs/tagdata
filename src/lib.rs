@@ -121,7 +121,7 @@ pub(crate) use storage::{coordination, db, freelist, meta, page, stats};
 pub(crate) use support::{bytes, errors};
 pub(crate) use tree::{node, page_node};
 
-pub use bucket::Bucket;
+pub use bucket::{AtomicResult, Bucket};
 pub use cursor::{Buckets, Cursor, KVPairs, ToBuckets, ToKVPairs};
 pub use data::*;
 pub use db::{DB, OpenOptions};

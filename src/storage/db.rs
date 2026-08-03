@@ -256,6 +256,51 @@ impl DB {
         Tx::new(self, writable)
     }
 
+    /// Starts a read-only snapshot transaction.
+    pub fn read_tx(&self) -> Result<Tx<'_>> {
+        Tx::new(self, false)
+    }
+
+    /// Starts a writable transaction, waiting until the single writer is available.
+    pub fn write_tx(&self) -> Result<Tx<'_>> {
+        Tx::new(self, true)
+    }
+
+    /// Attempts to start a writable transaction without waiting for another writer.
+    ///
+    /// Returns `Ok(None)` when either this process or another process currently owns
+    /// the writer slot.
+    pub fn try_write_tx(&self) -> Result<Option<Tx<'_>>> {
+        if self.inner.flags.read_only {
+            return Err(Error::ReadOnlyDB);
+        }
+        Tx::try_new_writable(self)
+    }
+
+    /// Runs synchronous work in a read-only transaction.
+    pub fn view<T>(&self, operation: impl FnOnce(&Tx<'_>) -> Result<T>) -> Result<T> {
+        let tx = self.read_tx()?;
+        operation(&tx)
+    }
+
+    /// Runs synchronous work in a write transaction and commits only on `Ok`.
+    pub fn update<T>(&self, operation: impl FnOnce(&Tx<'_>) -> Result<T>) -> Result<T> {
+        let tx = self.write_tx()?;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(&tx))) {
+            Ok(Ok(result)) => {
+                tx.commit()?;
+                Ok(result)
+            }
+            Ok(Err(error)) => Err(error),
+            Err(payload) => {
+                // Drop the transaction after catch_unwind has cleared the panicking
+                // state so its mutex guards are not poisoned during rollback.
+                drop(tx);
+                std::panic::resume_unwind(payload)
+            }
+        }
+    }
+
     /// Returns the database's pagesize.
     pub fn pagesize(&self) -> u64 {
         self.inner.pagesize
