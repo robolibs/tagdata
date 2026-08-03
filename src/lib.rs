@@ -116,7 +116,7 @@ mod storage;
 mod support;
 mod tree;
 
-pub(crate) use api::{bucket, changes, cursor, data, scoped, ttl, tx};
+pub(crate) use api::{bucket, changes, cursor, data, journal, scoped, ttl, tx};
 pub(crate) use storage::format;
 pub(crate) use storage::operator;
 pub(crate) use storage::verification;
@@ -137,6 +137,7 @@ pub use data::*;
 pub use db::{DB, DEFAULT_FORMAT_VERSION, LATEST_FORMAT_VERSION, OpenOptions};
 pub use errors::*;
 pub use format::FormatInfo;
+pub use journal::{JournalConfig, JournalGap, JournalReplay};
 pub use operator::{SalvageManifest, SkippedRecord};
 pub use scoped::TransactionError;
 pub use stats::Stats;

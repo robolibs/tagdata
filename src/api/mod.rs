@@ -3,6 +3,7 @@ pub(crate) mod bucket;
 pub(crate) mod changes;
 pub(crate) mod cursor;
 pub(crate) mod data;
+pub(crate) mod journal;
 pub(crate) mod scoped;
 pub(crate) mod ttl;
 pub(crate) mod tx;

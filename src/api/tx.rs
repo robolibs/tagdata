@@ -414,6 +414,8 @@ impl<'tx> Tx<'tx> {
             return Err(Error::ReadOnlyTx);
         }
         let mut tx = self.inner.borrow_mut();
+        let journal_changes = tx.changes.borrow().snapshot(tx.meta.tx_id);
+        crate::journal::persist(&mut tx, &journal_changes)?;
         let freelist = tx.freelist.clone();
         let mut freelist = freelist.borrow_mut();
         let meta = {

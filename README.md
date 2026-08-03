@@ -91,12 +91,41 @@ Large transactions cap tracking at 4,096 changes or 4 MiB and set `truncated`.
 `Bucket::put_with_ttl` persists a Unix-millisecond expiration in a reserved
 nested index. `get_live` applies the current wall clock, while `get_live_at`
 accepts an explicit time. Cleanup is deliberately lazy and bounded through
-`purge_expired`; no runtime or background thread is required. Raw `get` ignores
+the deadline-ordered `purge_expired`; `DB::purge_expired` applies one global
+limit while walking nested buckets. No runtime or background thread is required. Raw `get` ignores
 TTL and expired bytes remain visible to raw access until cleanup. Wall-clock
 jumps affect expiry, and ordinary `put` does not clear an existing TTL—call
 `clear_ttl` when making a key persistent. Backup and compaction preserve TTL
 indexes. See `docs/decisions/0002-changes-ttl-watches.md` for delivery and time
 semantics.
+
+## Durable change journal
+
+The default watch remains process-local and best-effort. Applications that need
+replay can opt into a journal stored atomically inside the user transaction:
+
+```rust,no_run
+use inspace::{DB, JournalConfig};
+
+# fn example() -> Result<(), inspace::Error> {
+let db = DB::open("my.db")?;
+db.enable_journal(JournalConfig { max_transactions: 10_000 })?;
+let replay = db.replay_journal(0, 100, None)?;
+for transaction in replay.transactions {
+    println!("transaction {}", transaction.transaction_id);
+}
+# Ok(())
+# }
+```
+
+Replay preserves transaction boundaries and supports the same filters as
+watches. Retention is transaction-count based. Consumer checkpoints are durable
+but do not pin history; `JournalReplay::gap` reports when retention passed a
+requested transaction. Version 1 journals keys and operation metadata, never
+values. Tracking remains bounded to 4,096 changes or 4 MiB per transaction, and
+oversized records carry `truncated = true`. Cross-process consumers poll replay
+by transaction ID, which also provides the base contract for secondary indexes,
+incremental backup, and replication adapters.
 
 ## Storage layout
 
@@ -132,6 +161,12 @@ offsets, overflow spans, tree ordering, and reachability are checked by
 `DB::verify()`. `OpenOptions::verify_on_open(true)` performs that full walk while
 opening. Normal commits checksum only dirty blocks; reads retain the mmap-backed
 zero-copy path, so full verification remains an explicit policy choice.
+
+Format version 3 is available explicitly with
+`OpenOptions::format_version(LATEST_FORMAT_VERSION)`. It persists each freed
+page's retirement transaction and only reclaims pages older than the oldest
+registered reader. Version 2 remains the default while the long-reader and
+write-churn benchmark results are evaluated.
 
 Format-version-1 files remain readable and writable. They do not gain checksums
 in place. Use `compact_to` (or `backup_to`) to produce a validated version-2
