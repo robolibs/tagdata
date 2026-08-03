@@ -39,5 +39,8 @@ impl Drop for RandomFile {
     #[allow(unused_must_use)]
     fn drop(&mut self) {
         std::fs::remove_file(&self.path);
+        let mut sidecar = self.path.as_os_str().to_owned();
+        sidecar.push(".inspace");
+        std::fs::remove_dir_all(std::path::PathBuf::from(sidecar));
     }
 }

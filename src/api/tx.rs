@@ -5,13 +5,16 @@ use std::{
     io::{Seek, SeekFrom, Write},
     marker::PhantomData,
     rc::Rc,
-    sync::{MutexGuard, RwLockReadGuard},
+    sync::MutexGuard,
 };
+
+use fs4::FileExt;
 
 use crate::{
     BucketName,
     bucket::{Bucket, BucketMeta, InnerBucket},
     bytes::ToBytes,
+    coordination::{GateGuard, ReaderRegistration},
     cursor::ToBuckets,
     db::{DB, MIN_ALLOC_SIZE},
     errors::{Error, Result},
@@ -22,9 +25,41 @@ use crate::{
     support::failpoints,
 };
 
+pub(crate) struct WriteGuard<'tx> {
+    file: MutexGuard<'tx, File>,
+    _gate: GateGuard<'tx>,
+}
+
+impl<'tx> WriteGuard<'tx> {
+    fn new(db: &'tx DB) -> Result<Self> {
+        let coordination = db.inner.coordination.as_ref().unwrap();
+        loop {
+            let gate = coordination.exclusive_gate()?;
+            let file = db.inner.file.lock()?;
+            match FileExt::try_lock_exclusive(&*file) {
+                Ok(()) => return Ok(Self { file, _gate: gate }),
+                Err(error) if error.kind() == fs4::lock_contended_error().kind() => {
+                    drop(file);
+                    drop(gate);
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+}
+
+impl Drop for WriteGuard<'_> {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&*self.file);
+    }
+}
+
 pub(crate) enum TxLock<'tx> {
-    Rw(MutexGuard<'tx, File>),
-    Ro { _guard: RwLockReadGuard<'tx, ()> },
+    Rw(WriteGuard<'tx>),
+    Ro {
+        _registration: Option<ReaderRegistration>,
+    },
 }
 
 impl<'tx> TxLock<'tx> {
@@ -114,29 +149,50 @@ impl<'tx> Tx<'tx> {
         if writable && db.inner.flags.read_only {
             return Err(Error::ReadOnlyDB);
         }
-        let lock = match writable {
-            true => TxLock::Rw(db.inner.file.lock()?),
-            false => TxLock::Ro {
-                _guard: db.inner.mmap_lock.read()?,
-            },
-        };
-        let mut freelist = db.inner.freelist.lock()?.clone();
-        let mut meta = db.inner.meta()?;
-        debug_assert!(meta.valid());
-        {
-            let mut open_ro_txs = db.inner.open_ro_txs.lock().unwrap();
-            if writable {
-                meta.tx_id += 1;
-                if !open_ro_txs.is_empty() {
-                    freelist.release(open_ro_txs[0]);
-                } else {
-                    freelist.release(meta.tx_id);
-                }
+
+        let (lock, meta, freelist) = if writable {
+            let lock = WriteGuard::new(db)?;
+            db.inner.refresh(&lock.file)?;
+            db.inner.reload_freelist()?;
+            let coordination = db.inner.coordination.as_ref().unwrap();
+            let (_, oldest_reader) = coordination.readers()?;
+            let mut freelist = db.inner.freelist.lock()?.clone();
+            let mut meta = db.inner.meta()?;
+            debug_assert!(meta.valid());
+            meta.tx_id += 1;
+            if oldest_reader.is_some() {
+                freelist.defer_all(meta.tx_id);
             } else {
-                open_ro_txs.push(meta.tx_id);
-                open_ro_txs.sort_unstable();
+                freelist.release(meta.tx_id);
             }
-        }
+            (TxLock::Rw(lock), meta, freelist)
+        } else {
+            let (meta, registration) = match &db.inner.coordination {
+                Some(coordination) => {
+                    let _gate = coordination.shared_gate()?;
+                    {
+                        let file = db.inner.file.lock()?;
+                        db.inner.refresh(&file)?;
+                    }
+                    let meta = db.inner.meta()?;
+                    let registration = coordination.register(meta.tx_id)?;
+                    (meta, Some(registration))
+                }
+                None => (db.inner.meta()?, None),
+            };
+            debug_assert!(meta.valid());
+            let mut open_ro_txs = db.inner.open_ro_txs.lock().unwrap();
+            open_ro_txs.push(meta.tx_id);
+            open_ro_txs.sort_unstable();
+            let freelist = db.inner.freelist.lock()?.clone();
+            (
+                TxLock::Ro {
+                    _registration: registration,
+                },
+                meta,
+                freelist,
+            )
+        };
         let freelist = Rc::new(RefCell::new(TxFreelist::new(meta.clone(), freelist)));
 
         let data = db.inner.data.lock()?.clone();
@@ -287,7 +343,8 @@ impl<'tx> Tx<'tx> {
 
 impl<'tx> TxInner<'tx> {
     fn write_data(&mut self, freelist: &mut TxFreelist) -> Result<()> {
-        if let TxLock::Rw(file) = &mut self.lock {
+        if let TxLock::Rw(lock) = &mut self.lock {
+            let file = &mut *lock.file;
             // Write the freelist to a new page
             {
                 freelist.free(self.meta.freelist_page, self.num_freelist_pages);
@@ -333,7 +390,8 @@ impl<'tx> TxInner<'tx> {
         if self.db.inner.flags.strict_mode {
             self.check()?;
         }
-        if let TxLock::Rw(file) = &mut self.lock {
+        if let TxLock::Rw(lock) = &mut self.lock {
+            let file = &mut *lock.file;
             // write meta page to file
             {
                 let mut buf = vec![0; self.db.inner.pagesize as usize];

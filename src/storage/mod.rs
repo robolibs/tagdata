@@ -1,3 +1,4 @@
+pub(crate) mod coordination;
 pub(crate) mod db;
 pub(crate) mod freelist;
 pub(crate) mod meta;

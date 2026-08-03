@@ -97,6 +97,14 @@ impl Freelist {
         self.pending_pages.values().map(Vec::len).sum::<usize>() as u64
     }
 
+    pub(crate) fn defer_all(&mut self, tx_id: u64) {
+        if self.free_pages.is_empty() {
+            return;
+        }
+        let pages = self.pending_pages.entry(tx_id).or_default();
+        pages.extend(std::mem::take(&mut self.free_pages));
+    }
+
     pub(crate) fn init(&mut self, free_pages: &[PageID]) {
         free_pages.iter().for_each(|id| {
             self.free_pages.insert(*id);

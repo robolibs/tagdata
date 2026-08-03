@@ -117,7 +117,7 @@ mod support;
 mod tree;
 
 pub(crate) use api::{bucket, cursor, data, tx};
-pub(crate) use storage::{db, freelist, meta, page, stats};
+pub(crate) use storage::{coordination, db, freelist, meta, page, stats};
 pub(crate) use support::{bytes, errors};
 pub(crate) use tree::{node, page_node};
 
@@ -176,6 +176,9 @@ mod testutil {
     impl Drop for RandomFile {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.path);
+            let mut sidecar = self.path.as_os_str().to_owned();
+            sidecar.push(".inspace");
+            let _ = std::fs::remove_dir_all(std::path::PathBuf::from(sidecar));
         }
     }
 

@@ -5,7 +5,7 @@ use std::{
     io::Write,
     path::Path,
     sync::{
-        Arc, Mutex, RwLock,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -15,8 +15,8 @@ use memmap2::Mmap;
 use page_size::get as get_page_size;
 
 use crate::{
-    bucket::BucketMeta, errors::Result, freelist::Freelist, meta::Meta, page::Page, stats::Stats,
-    tx::Tx,
+    bucket::BucketMeta, coordination::Coordination, errors::Result, freelist::Freelist, meta::Meta,
+    page::Page, stats::Stats, tx::Tx,
 };
 
 const MAGIC_VALUE: u32 = 0x00AB_CDEF;
@@ -162,7 +162,7 @@ impl OpenOptions {
             open_file(path, false, self.flags.direct_writes, false)?
         };
 
-        let db = DBInner::open(file, self.pagesize, self.flags)?;
+        let db = DBInner::open(file, self.pagesize, self.flags, path)?;
         Ok(DB {
             inner: Arc::new(db),
         })
@@ -244,15 +244,26 @@ impl DB {
 
     /// Returns a point-in-time snapshot of database statistics.
     pub fn stats(&self) -> Result<Stats> {
-        let file_bytes = self.inner.file.lock()?.metadata()?.len();
+        let _gate = match &self.inner.coordination {
+            Some(coordination) => Some(coordination.shared_gate()?),
+            None => None,
+        };
+        let file_bytes = {
+            let file = self.inner.file.lock()?;
+            self.inner.refresh(&file)?;
+            file.metadata()?.len()
+        };
         let meta = self.inner.meta()?;
         let (free_pages, pending_pages) = {
             let freelist = self.inner.freelist.lock()?;
             (freelist.free_count(), freelist.pending_count())
         };
-        let (active_readers, oldest_reader_tx_id) = {
-            let readers = self.inner.open_ro_txs.lock()?;
-            (readers.len() as u64, readers.first().copied())
+        let (active_readers, oldest_reader_tx_id) = match &self.inner.coordination {
+            Some(coordination) => coordination.readers()?,
+            None => {
+                let readers = self.inner.open_ro_txs.lock()?;
+                (readers.len() as u64, readers.first().copied())
+            }
         };
 
         Ok(Stats {
@@ -281,10 +292,10 @@ impl DB {
 }
 pub(crate) struct DBInner {
     pub(crate) data: Mutex<Arc<Mmap>>,
-    pub(crate) mmap_lock: RwLock<()>,
     pub(crate) freelist: Mutex<Freelist>,
     pub(crate) file: Mutex<File>,
     pub(crate) open_ro_txs: Mutex<Vec<u64>>,
+    pub(crate) coordination: Option<Coordination>,
     pub(crate) flags: DBFlags,
 
     pub(crate) pagesize: u64,
@@ -293,21 +304,24 @@ pub(crate) struct DBInner {
 }
 
 impl DBInner {
-    pub(crate) fn open(file: File, pagesize: u64, flags: DBFlags) -> Result<DBInner> {
+    pub(crate) fn open(file: File, pagesize: u64, flags: DBFlags, path: &Path) -> Result<DBInner> {
         if flags.read_only {
             FileExt::lock_shared(&file)?;
-        } else {
-            FileExt::lock_exclusive(&file)?;
         }
+        let coordination = if flags.read_only {
+            None
+        } else {
+            Some(Coordination::open(path)?)
+        };
         let mmap = mmap(&file, flags.mmap_populate)?;
         let mmap = Mutex::new(Arc::new(mmap));
         let db = DBInner {
             data: mmap,
-            mmap_lock: RwLock::new(()),
             freelist: Mutex::new(Freelist::new()),
 
             file: Mutex::new(file),
             open_ro_txs: Mutex::new(Vec::new()),
+            coordination,
 
             pagesize,
             flags,
@@ -330,11 +344,29 @@ impl DBInner {
 
     pub(crate) fn resize(&self, file: &File, new_size: u64) -> Result<Arc<Mmap>> {
         file.allocate(new_size)?;
-        let _lock = self.mmap_lock.write()?;
         let mut data = self.data.lock()?;
         let mmap = mmap(file, self.flags.mmap_populate)?;
         *data = Arc::new(mmap);
         Ok(data.clone())
+    }
+
+    pub(crate) fn refresh(&self, file: &File) -> Result<()> {
+        let file_len = file.metadata()?.len();
+        let mut data = self.data.lock()?;
+        if data.len() as u64 != file_len {
+            *data = Arc::new(mmap(file, self.flags.mmap_populate)?);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn reload_freelist(&self) -> Result<()> {
+        let meta = self.meta()?;
+        let data = self.data.lock()?;
+        let free_pages = Page::from_buf(&data, meta.freelist_page, self.pagesize).freelist();
+        let mut freelist = Freelist::new();
+        freelist.init(free_pages);
+        *self.freelist.lock()? = freelist;
+        Ok(())
     }
 
     pub(crate) fn meta(&self) -> Result<Meta> {

@@ -8,7 +8,8 @@ See [acknowledgments](ACKOLEGMENT.md) for prior work that informed the project.
 
 - **ACID transactions:** serializable and isolated transactions with explicit
   commit and automatic rollback on drop.
-- **Concurrent access:** multiple lock-free readers and one concurrent writer.
+- **Concurrent access:** multiple snapshot readers and one writer across threads
+  and processes.
 - **Memory-mapped reads:** values are read directly from the mapped database file.
 - **B+ tree storage:** efficient random lookups and ordered sequential access.
 - **Nested buckets:** byte-key/byte-value namespaces can form arbitrary trees.
@@ -61,6 +62,10 @@ complete previous snapshot or the complete newly published snapshot.
 
 Use `OpenOptions::new().read_only()` for a handle that never creates, resizes, or
 writes the database. A read-only handle rejects writable transactions.
+
+Writable handles coordinate through a sibling `.inspace` directory. Reader
+registrations are removed automatically, including stale registrations left by
+terminated processes. Keep that directory beside the database while it is live.
 
 ## Commands
 

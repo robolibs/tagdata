@@ -112,9 +112,9 @@ fn write_open_child() -> Result<(), Error> {
         return Ok(());
     };
     let db = DB::open(path)?;
-    let tx = db.tx(false)?;
-    assert!(tx.get_bucket("data")?.get("key").is_some());
-    Ok(())
+    let tx = db.tx(true)?;
+    tx.get_bucket("data")?.put("writer", "finished")?;
+    tx.commit()
 }
 
 fn initialize(file: &common::RandomFile) -> Result<(), Error> {
