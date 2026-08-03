@@ -1,5 +1,5 @@
 use std::time::Instant;
-use std::{fs, hash::Hasher};
+use std::{fs, hash::Hasher, hint::black_box};
 
 use fnv::FnvHasher;
 use inspace::{DB, Error};
@@ -55,15 +55,16 @@ fn main() -> Result<(), Error> {
 
     let bytes = fs::read(&path)?;
     let started = Instant::now();
-    let _ = Sha3_256::digest(&bytes);
+    black_box(Sha3_256::digest(black_box(&bytes)));
     println!("SHA3-256:    {:#?}", started.elapsed());
     let started = Instant::now();
     let mut fnv = FnvHasher::default();
-    fnv.write(&bytes);
-    let _ = fnv.finish();
+    fnv.write(black_box(&bytes));
+    black_box(fnv.finish());
     println!("FNV-1a-64:   {:#?}", started.elapsed());
 
     drop(db);
     fs::remove_file(path)?;
+    let _ = fs::remove_dir_all(std::env::temp_dir().join("inspace-benchmark.db.inspace"));
     Ok(())
 }
