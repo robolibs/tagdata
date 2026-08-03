@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -115,7 +115,7 @@ fn replaces_deletes_and_recreates_data() -> Result<()> {
 }
 
 #[test]
-fn discards_a_torn_trailing_transaction() -> Result<()> {
+fn ignores_uncommitted_trailing_bytes() -> Result<()> {
     let file = TestFile::new();
     {
         let db = Database::open(&file.0)?;
@@ -132,12 +132,40 @@ fn discards_a_torn_trailing_transaction() -> Result<()> {
     assert!(fs::metadata(&file.0)?.len() > valid_len);
 
     let recovered = Database::open(&file.0)?;
-    assert_eq!(fs::metadata(&file.0)?.len(), valid_len);
+    assert!(fs::metadata(&file.0)?.len() > valid_len);
+    recovered.check()?;
     recovered.view(|tx| {
         assert_eq!(
             tx.bucket(b"safe")?.get_kv(b"key").map(|pair| pair.value()),
             Some(&b"value"[..])
         );
+        Ok(())
+    })
+}
+
+#[test]
+fn falls_back_when_the_newest_meta_page_is_torn() -> Result<()> {
+    let file = TestFile::new();
+    {
+        let db = Database::open(&file.0)?;
+        db.update(|tx| {
+            tx.create_bucket("stable")?;
+            Ok(())
+        })?;
+        db.update(|tx| tx.put("stable", "new", "value"))?;
+        assert_eq!(db.transaction_id(), 2);
+    }
+
+    let mut raw = OpenOptions::new().read(true).write(true).open(&file.0)?;
+    raw.seek(SeekFrom::Start(24))?;
+    raw.write_all(&[0xff])?;
+    raw.sync_data()?;
+    drop(raw);
+
+    let recovered = Database::open(&file.0)?;
+    assert_eq!(recovered.transaction_id(), 1);
+    recovered.view(|tx| {
+        assert_eq!(tx.bucket(b"stable")?.get(b"new"), None);
         Ok(())
     })
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::ops::{Bound, RangeBounds};
@@ -8,11 +8,15 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use fs4::FileExt;
 use memmap2::{Mmap, MmapOptions};
 
-use crate::format::{
-    CREATE_BUCKET, DELETE, DELETE_BUCKET, FILE_HEADER_LEN, Operation, PUT, Record,
-    encode_transaction, file_header, parse_transaction, validate_file_header,
-};
+use crate::page::{BuiltTree, Meta, Node, Record as PageRecord, build_tree};
 use crate::{BucketName, Cursor, Data, Error, KVPair, Range, Result};
+
+const PAGE_SIZE: usize = 4096;
+const CREATE_BUCKET: u8 = 1;
+const DELETE_BUCKET: u8 = 2;
+const PUT: u8 = 3;
+const DELETE: u8 = 4;
+type Operation = (u8, Vec<u8>, Vec<u8>, Vec<u8>);
 
 #[derive(Clone, Copy, Debug)]
 struct Slice {
@@ -35,11 +39,10 @@ struct Entry {
 
 struct State {
     mmap: Mmap,
+    meta: Meta,
     buckets: HashMap<u64, Vec<Slice>>,
     entries: HashMap<u64, Vec<Entry>>,
     next_ints: HashMap<Vec<u8>, u64>,
-    txid: u64,
-    valid_len: usize,
 }
 
 /// A single-file, memory-mapped database.
@@ -56,7 +59,7 @@ struct Inner {
 impl Database {
     /// Opens an existing database, or creates a new one at `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
@@ -64,37 +67,10 @@ impl Database {
             .open(path)?;
         FileExt::lock(&file)?;
         if file.metadata()?.len() == 0 {
-            file.write_all(&file_header())?;
-            file.sync_data()?;
+            initialize(&file)?;
         }
         let mmap = map(&file)?;
-        validate_file_header(&mmap)?;
-        let mut state = State {
-            mmap,
-            buckets: HashMap::new(),
-            entries: HashMap::new(),
-            next_ints: HashMap::new(),
-            txid: 0,
-            valid_len: FILE_HEADER_LEN,
-        };
-        recover(&mut state)?;
-        if state.valid_len != state.mmap.len() {
-            let valid_len = state.valid_len;
-            drop(state);
-            file.set_len(valid_len as u64)?;
-            file.sync_data()?;
-            let mmap = map(&file)?;
-            let mut repaired = State {
-                mmap,
-                buckets: HashMap::new(),
-                entries: HashMap::new(),
-                next_ints: HashMap::new(),
-                txid: 0,
-                valid_len: FILE_HEADER_LEN,
-            };
-            recover(&mut repaired)?;
-            state = repaired;
-        }
+        let state = load_state(mmap)?;
         Ok(Self {
             inner: Arc::new(Inner {
                 file,
@@ -129,43 +105,38 @@ impl Database {
         }
 
         validate_operations(&state, &tx.operations)?;
-        let txid = state.txid.checked_add(1).ok_or(Error::TooLarge)?;
-        let encoded = encode_transaction(txid, &tx.operations)?;
-        let start = state.valid_len;
-        (&self.inner.file).seek(SeekFrom::Start(start as u64))?;
-        (&self.inner.file).write_all(&encoded)?;
-        self.inner.file.sync_data()?;
-
-        let new_mmap = map(&self.inner.file)?;
-        let parsed = parse_transaction(&new_mmap, start)?
-            .ok_or(Error::Corrupt("committed transaction is incomplete"))?;
-        state.mmap = new_mmap;
-        apply_records(&mut state, &parsed.records)?;
-        state.txid = parsed.txid;
-        state.valid_len = parsed.end;
+        let mut owned = OwnedState::from_state(&state);
+        owned.apply(&tx.operations)?;
+        let txid = state.meta.txid.checked_add(1).ok_or(Error::TooLarge)?;
+        let records = owned.records()?;
+        let tree = build_tree(
+            &records,
+            state.meta.page_size as usize,
+            state.meta.high_water,
+        )?;
+        let meta = Meta {
+            page_size: state.meta.page_size,
+            txid,
+            root: tree.root,
+            high_water: tree.high_water,
+            freelist: 0,
+        };
+        let empty = MmapOptions::new().len(1).map_anon()?.make_read_only()?;
+        state.mmap = empty;
+        write_tree(&self.inner.file, &tree, meta)?;
+        *state = load_state(map(&self.inner.file)?)?;
         Ok(result)
     }
 
     /// Returns the last committed transaction identifier.
     pub fn transaction_id(&self) -> u64 {
-        self.read_state().txid
+        self.read_state().meta.txid
     }
 
     pub fn check(&self) -> Result<()> {
         let state = self.read_state();
-        let mmap = map(&self.inner.file)?;
-        validate_file_header(&mmap)?;
-        let mut checked = State {
-            mmap,
-            buckets: HashMap::new(),
-            entries: HashMap::new(),
-            next_ints: HashMap::new(),
-            txid: 0,
-            valid_len: FILE_HEADER_LEN,
-        };
-        recover(&mut checked)?;
-        if checked.valid_len != checked.mmap.len()
-            || checked.txid != state.txid
+        let checked = load_state(map(&self.inner.file)?)?;
+        if checked.meta != state.meta
             || checked.buckets.values().map(Vec::len).sum::<usize>()
                 != state.buckets.values().map(Vec::len).sum::<usize>()
             || checked.entries.values().map(Vec::len).sum::<usize>()
@@ -556,104 +527,340 @@ impl<'tx, 'db> WriteBucket<'tx, 'db> {
 }
 
 fn map(file: &File) -> Result<Mmap> {
-    // SAFETY: mappings are read-only; `inspace` never truncates or modifies bytes
-    // covered by a live mapping. Commits only append, sync, create a larger map,
-    // and replace the old map while holding the exclusive state lock.
+    // The exclusive state lock removes the old map before committed pages change.
     Ok(unsafe { MmapOptions::new().map(file)? })
 }
 
-fn recover(state: &mut State) -> Result<()> {
-    let mut cursor = FILE_HEADER_LEN;
-    loop {
-        match parse_transaction(&state.mmap, cursor)? {
-            Some(transaction) => {
-                if transaction.txid != state.txid + 1 {
-                    return Err(Error::Corrupt("non-sequential transaction id"));
-                }
-                apply_records(state, &transaction.records)?;
-                state.txid = transaction.txid;
-                state.valid_len = transaction.end;
-                cursor = transaction.end;
-            }
-            None => return Ok(()),
-        }
+fn initialize(file: &File) -> Result<()> {
+    let tree = build_tree(&[], PAGE_SIZE, 2)?;
+    let meta = Meta {
+        page_size: PAGE_SIZE as u32,
+        txid: 0,
+        root: tree.root,
+        high_water: tree.high_water,
+        freelist: 0,
+    };
+    file.set_len(meta.high_water * PAGE_SIZE as u64)?;
+    for (page, bytes) in &tree.pages {
+        write_at(file, page * PAGE_SIZE as u64, bytes)?;
     }
+    let encoded = meta.encode()?;
+    write_at(file, 0, &encoded)?;
+    write_at(file, PAGE_SIZE as u64, &encoded)?;
+    file.sync_data()?;
+    Ok(())
 }
 
-fn apply_records(state: &mut State, records: &[Record]) -> Result<()> {
-    for record in records {
-        let bucket = Slice {
-            offset: record.bucket_offset,
-            len: record.bucket_len,
-        };
-        let key = Slice {
-            offset: record.key_offset,
-            len: record.key_len,
-        };
-        let value = Slice {
-            offset: record.value_offset,
-            len: record.value_len,
-        };
-        match record.kind {
-            CREATE_BUCKET => {
-                let path = bucket.get(&state.mmap).to_vec();
-                if bucket_exists(state, &path) {
-                    return Err(Error::Corrupt("bucket created twice"));
-                }
-                let parent = parent_path(&path).ok_or(Error::Corrupt("invalid bucket path"))?;
-                let name = path_name(&path).ok_or(Error::Corrupt("invalid bucket path"))?;
-                if !parent.is_empty() {
-                    if !bucket_exists(state, parent) {
-                        return Err(Error::Corrupt("bucket parent is missing"));
-                    }
-                    if find_entry(state, parent, name).is_some() {
-                        return Err(Error::Corrupt("bucket conflicts with key"));
-                    }
-                    *state.next_ints.entry(parent.to_vec()).or_default() += 1;
-                }
-                insert_bucket(state, bucket);
-                state.next_ints.insert(path, 0);
+fn write_tree(file: &File, tree: &BuiltTree, meta: Meta) -> Result<()> {
+    file.set_len(meta.high_water * u64::from(meta.page_size))?;
+    for (page, bytes) in &tree.pages {
+        write_at(file, page * u64::from(meta.page_size), bytes)?;
+    }
+    file.sync_data()?;
+    let slot = meta.txid & 1;
+    write_at(file, slot * u64::from(meta.page_size), &meta.encode()?)?;
+    file.sync_data()?;
+    Ok(())
+}
+
+fn write_at(file: &File, offset: u64, bytes: &[u8]) -> Result<()> {
+    let mut file = file;
+    file.seek(SeekFrom::Start(offset))?;
+    file.write_all(bytes)?;
+    Ok(())
+}
+
+fn load_state(mmap: Mmap) -> Result<State> {
+    let meta = select_meta(&mmap)?;
+    let required = meta
+        .high_water
+        .checked_mul(u64::from(meta.page_size))
+        .ok_or(Error::Corrupt("file length overflow"))?;
+    if required > mmap.len() as u64 {
+        return Err(Error::Corrupt("committed pages exceed file"));
+    }
+    let mut leaves = Vec::new();
+    let mut visited = BTreeSet::new();
+    walk_tree(&mmap, meta, meta.root, &mut visited, &mut leaves)?;
+    let mut loaded = Vec::with_capacity(leaves.len());
+    let mut previous: Option<Vec<u8>> = None;
+    for (key_slice, value_slice) in leaves {
+        let key = key_slice.get(&mmap);
+        let value = value_slice.get(&mmap);
+        if previous.as_deref().is_some_and(|old| old >= key) {
+            return Err(Error::Corrupt("tree keys are not ordered"));
+        }
+        previous = Some(key.to_vec());
+        match key.first() {
+            Some(0) if value.len() == 8 => {
+                let path = Slice {
+                    offset: key_slice.offset + 1,
+                    len: key_slice.len - 1,
+                };
+                let next = u64::from_le_bytes(value.try_into().expect("length checked"));
+                loaded.push(LoadedRecord::Bucket(path, next));
             }
-            DELETE_BUCKET => {
-                let bucket_bytes = bucket.get(&state.mmap).to_vec();
-                if !bucket_exists(state, &bucket_bytes) {
-                    return Err(Error::Corrupt("deleted bucket is missing"));
+            Some(1) if key.len() >= 5 => {
+                let path_len =
+                    u32::from_le_bytes(key[1..5].try_into().expect("length checked")) as usize;
+                if key.len() < 5 + path_len {
+                    return Err(Error::Corrupt("invalid key path length"));
                 }
-                remove_bucket(state, &bucket_bytes);
-                remove_bucket_entries(state, &bucket_bytes);
-                state
-                    .next_ints
-                    .retain(|path, _| !path.starts_with(&bucket_bytes));
+                loaded.push(LoadedRecord::Entry(Entry {
+                    bucket: Slice {
+                        offset: key_slice.offset + 5,
+                        len: path_len,
+                    },
+                    key: Slice {
+                        offset: key_slice.offset + 5 + path_len,
+                        len: key.len() - 5 - path_len,
+                    },
+                    value: value_slice,
+                }));
             }
-            PUT => {
-                let bucket_bytes = bucket.get(&state.mmap).to_vec();
-                let key_bytes = key.get(&state.mmap);
-                if !bucket_exists(state, &bucket_bytes) {
-                    return Err(Error::Corrupt("key bucket is missing"));
+            _ => return Err(Error::Corrupt("invalid tree record")),
+        }
+    }
+    let mut state = State {
+        mmap,
+        meta,
+        buckets: HashMap::new(),
+        entries: HashMap::new(),
+        next_ints: HashMap::new(),
+    };
+    for record in loaded {
+        match record {
+            LoadedRecord::Bucket(path, next) => {
+                let bytes = path.get(&state.mmap);
+                if parent_path(bytes).is_none() || bucket_exists(&state, bytes) {
+                    return Err(Error::Corrupt("invalid bucket record"));
                 }
-                let child = child_path(&bucket_bytes, key_bytes)?;
-                if bucket_exists(state, &child) {
-                    return Err(Error::Corrupt("key conflicts with bucket"));
-                }
-                if find_entry(state, &bucket_bytes, key_bytes).is_none() {
-                    *state.next_ints.entry(bucket_bytes).or_default() += 1;
-                }
-                insert_entry(state, Entry { bucket, key, value });
+                state.next_ints.insert(bytes.to_vec(), next);
+                insert_bucket(&mut state, path);
             }
-            DELETE => {
-                let bucket_bytes = bucket.get(&state.mmap).to_vec();
-                let key_bytes = key.get(&state.mmap).to_vec();
-                if !bucket_exists(state, &bucket_bytes)
-                    || find_entry(state, &bucket_bytes, &key_bytes).is_none()
-                {
-                    return Err(Error::Corrupt("deleted key is missing"));
+            LoadedRecord::Entry(entry) => {
+                let bucket = entry.bucket.get(&state.mmap);
+                let key = entry.key.get(&state.mmap);
+                if !bucket_exists(&state, bucket) || find_entry(&state, bucket, key).is_some() {
+                    return Err(Error::Corrupt("invalid key record"));
                 }
-                remove_entry(state, &bucket_bytes, &key_bytes);
+                insert_entry(&mut state, entry);
             }
-            _ => return Err(Error::Corrupt("unknown record kind")),
+        }
+    }
+    validate_loaded_state(&state)?;
+    Ok(state)
+}
+
+fn select_meta(mmap: &Mmap) -> Result<Meta> {
+    if mmap.len() < PAGE_SIZE * 2 {
+        return Err(Error::Corrupt("meta pages are truncated"));
+    }
+    let first = Meta::decode(&mmap[..PAGE_SIZE]).ok();
+    let second = Meta::decode(&mmap[PAGE_SIZE..PAGE_SIZE * 2]).ok();
+    let meta = match (first, second) {
+        (Some(left), Some(right)) => {
+            if left.txid >= right.txid {
+                left
+            } else {
+                right
+            }
+        }
+        (Some(meta), None) | (None, Some(meta)) => meta,
+        (None, None) => return Err(Error::Corrupt("both meta pages are invalid")),
+    };
+    if meta.page_size as usize != PAGE_SIZE {
+        return Err(Error::Corrupt("unsupported page size"));
+    }
+    Ok(meta)
+}
+
+fn walk_tree(
+    mmap: &Mmap,
+    meta: Meta,
+    page: u64,
+    visited: &mut BTreeSet<u64>,
+    leaves: &mut Vec<(Slice, Slice)>,
+) -> Result<()> {
+    if page < 2 || page >= meta.high_water || !visited.insert(page) {
+        return Err(Error::Corrupt("invalid or repeated tree page"));
+    }
+    let offset = usize::try_from(page)
+        .ok()
+        .and_then(|page| page.checked_mul(meta.page_size as usize))
+        .ok_or(Error::Corrupt("page offset overflow"))?;
+    let node = Node::decode(&mmap[offset..], meta.page_size as usize)?;
+    if node.page() != page || page + node.span() as u64 > meta.high_water {
+        return Err(Error::Corrupt("node page identity mismatch"));
+    }
+    for covered in page..page + node.span() as u64 {
+        if covered != page && !visited.insert(covered) {
+            return Err(Error::Corrupt("overlapping tree pages"));
+        }
+    }
+    if node.is_leaf() {
+        for (key, value) in node.leaf_records()? {
+            leaves.push((slice_in_map(mmap, key)?, slice_in_map(mmap, value)?));
+        }
+    } else {
+        let branches = node.branches()?;
+        if branches.is_empty() {
+            return Err(Error::Corrupt("empty branch node"));
+        }
+        for (_, child) in branches {
+            walk_tree(mmap, meta, child, visited, leaves)?;
         }
     }
     Ok(())
+}
+
+enum LoadedRecord {
+    Bucket(Slice, u64),
+    Entry(Entry),
+}
+
+fn slice_in_map(mmap: &Mmap, bytes: &[u8]) -> Result<Slice> {
+    let base = mmap.as_ptr() as usize;
+    let start = bytes.as_ptr() as usize;
+    let offset = start
+        .checked_sub(base)
+        .ok_or(Error::Corrupt("slice is outside mapping"))?;
+    if offset + bytes.len() > mmap.len() {
+        return Err(Error::Corrupt("slice is outside mapping"));
+    }
+    Ok(Slice {
+        offset,
+        len: bytes.len(),
+    })
+}
+
+fn validate_loaded_state(state: &State) -> Result<()> {
+    for paths in state.buckets.values() {
+        for path in paths {
+            let path = path.get(&state.mmap);
+            let parent = parent_path(path).ok_or(Error::Corrupt("invalid bucket path"))?;
+            if !parent.is_empty() && !bucket_exists(state, parent) {
+                return Err(Error::Corrupt("bucket parent is missing"));
+            }
+        }
+    }
+    for entries in state.entries.values() {
+        for entry in entries {
+            let bucket = entry.bucket.get(&state.mmap);
+            let key = entry.key.get(&state.mmap);
+            if bucket_exists(state, &child_path(bucket, key)?) {
+                return Err(Error::Corrupt("key conflicts with bucket"));
+            }
+        }
+    }
+    Ok(())
+}
+
+struct OwnedState {
+    buckets: BTreeMap<Vec<u8>, u64>,
+    entries: BTreeMap<(Vec<u8>, Vec<u8>), Vec<u8>>,
+}
+
+impl OwnedState {
+    fn from_state(state: &State) -> Self {
+        let mut buckets = BTreeMap::new();
+        for paths in state.buckets.values() {
+            for path in paths {
+                let path = path.get(&state.mmap).to_vec();
+                let next = state.next_ints.get(&path).copied().unwrap_or(0);
+                buckets.insert(path, next);
+            }
+        }
+        let mut entries = BTreeMap::new();
+        for list in state.entries.values() {
+            for entry in list {
+                entries.insert(
+                    (
+                        entry.bucket.get(&state.mmap).to_vec(),
+                        entry.key.get(&state.mmap).to_vec(),
+                    ),
+                    entry.value.get(&state.mmap).to_vec(),
+                );
+            }
+        }
+        Self { buckets, entries }
+    }
+
+    fn apply(&mut self, operations: &[Operation]) -> Result<()> {
+        for (kind, bucket, key, value) in operations {
+            match *kind {
+                CREATE_BUCKET => {
+                    if self.buckets.contains_key(bucket) {
+                        return Err(Error::BucketExists);
+                    }
+                    if let Some(parent) = parent_path(bucket)
+                        && !parent.is_empty()
+                    {
+                        let next = self.buckets.get_mut(parent).ok_or(Error::BucketNotFound)?;
+                        *next = next.saturating_add(1);
+                    }
+                    self.buckets.insert(bucket.clone(), 0);
+                }
+                DELETE_BUCKET => {
+                    if self.buckets.remove(bucket).is_none() {
+                        return Err(Error::BucketNotFound);
+                    }
+                    self.buckets.retain(|path, _| !path.starts_with(bucket));
+                    self.entries
+                        .retain(|(path, _), _| !path.starts_with(bucket));
+                }
+                PUT => {
+                    if !self.buckets.contains_key(bucket) {
+                        return Err(Error::BucketNotFound);
+                    }
+                    if self
+                        .entries
+                        .insert((bucket.clone(), key.clone()), value.clone())
+                        .is_none()
+                    {
+                        *self.buckets.get_mut(bucket).expect("checked") += 1;
+                    }
+                }
+                DELETE => {
+                    if self
+                        .entries
+                        .remove(&(bucket.clone(), key.clone()))
+                        .is_none()
+                    {
+                        return Err(Error::KeyValueMissing);
+                    }
+                }
+                _ => return Err(Error::Corrupt("unknown staged operation")),
+            }
+        }
+        Ok(())
+    }
+
+    fn records(&self) -> Result<Vec<PageRecord>> {
+        let mut records = Vec::with_capacity(self.buckets.len() + self.entries.len());
+        for (path, next) in &self.buckets {
+            let mut key = Vec::with_capacity(1 + path.len());
+            key.push(0);
+            key.extend_from_slice(path);
+            records.push(PageRecord {
+                key,
+                value: next.to_le_bytes().to_vec(),
+            });
+        }
+        for ((path, entry_key), value) in &self.entries {
+            let path_len = u32::try_from(path.len()).map_err(|_| Error::TooLarge)?;
+            let mut key = Vec::with_capacity(5 + path.len() + entry_key.len());
+            key.push(1);
+            key.extend_from_slice(&path_len.to_le_bytes());
+            key.extend_from_slice(path);
+            key.extend_from_slice(entry_key);
+            records.push(PageRecord {
+                key,
+                value: value.clone(),
+            });
+        }
+        Ok(records)
+    }
 }
 
 fn validate_operations(state: &State, operations: &[Operation]) -> Result<()> {
@@ -692,14 +899,6 @@ fn insert_bucket(state: &mut State, bucket: Slice) {
     list.push(bucket);
 }
 
-fn remove_bucket(state: &mut State, bucket: &[u8]) {
-    let mmap = &state.mmap;
-    state.buckets.retain(|_, list| {
-        list.retain(|existing| !existing.get(mmap).starts_with(bucket));
-        !list.is_empty()
-    });
-}
-
 fn insert_entry(state: &mut State, entry: Entry) {
     let bucket = entry.bucket.get(&state.mmap);
     let key = entry.key.get(&state.mmap);
@@ -708,21 +907,6 @@ fn insert_entry(state: &mut State, entry: Entry) {
     let list = state.entries.entry(combined_hash).or_default();
     list.retain(|existing| existing.bucket.get(mmap) != bucket || existing.key.get(mmap) != key);
     list.push(entry);
-}
-
-fn remove_entry(state: &mut State, bucket: &[u8], key: &[u8]) {
-    if let Some(list) = state.entries.get_mut(&pair_hash(bucket, key)) {
-        let mmap = &state.mmap;
-        list.retain(|entry| entry.bucket.get(mmap) != bucket || entry.key.get(mmap) != key);
-    }
-}
-
-fn remove_bucket_entries(state: &mut State, bucket: &[u8]) {
-    let mmap = &state.mmap;
-    state.entries.retain(|_, list| {
-        list.retain(|entry| !entry.bucket.get(mmap).starts_with(bucket));
-        !list.is_empty()
-    });
 }
 
 fn root_path(name: &[u8]) -> Result<Vec<u8>> {

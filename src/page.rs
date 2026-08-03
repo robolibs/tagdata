@@ -128,6 +128,10 @@ impl<'a> Node<'a> {
         self.span
     }
 
+    pub fn is_leaf(&self) -> bool {
+        self.kind == LEAF
+    }
+
     pub fn leaf_records(&self) -> Result<Vec<(&'a [u8], &'a [u8])>> {
         if self.kind != LEAF {
             return Err(Error::Corrupt("expected leaf node"));
@@ -220,16 +224,12 @@ pub(crate) fn build_tree(records: &[Record], page_size: usize, start: u64) -> Re
         size += record_size;
         batch.push(record);
     }
-    if batch.is_empty() {
-        batch.push(Record {
-            key: Vec::new(),
-            value: Vec::new(),
-        });
-    }
     let node = encode_leaf(&batch, page_size, next_page)?;
     let span = node.len() / page_size;
     level.push(LevelNode {
-        first_key: batch[0].key.clone(),
+        first_key: batch
+            .first()
+            .map_or_else(Vec::new, |record| record.key.clone()),
         page: next_page,
     });
     pages.push((next_page, node));

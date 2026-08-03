@@ -10,13 +10,13 @@ See [acknowledgments](ACKOLEGMENT.md) for prior work that informed the project.
 - **Concurrent readers, single writer:** read transactions share the map; a write
   transaction takes exclusive access only until its durable commit completes.
 - **Atomic callback transactions:** an error from the callback writes nothing.
-- **Crash recovery:** every commit has a transaction ID, payload checksum, and
-  validated footer. A torn final commit is discarded when the database reopens.
+- **Crash recovery:** checksummed tree pages are published through alternating
+  meta pages; an invalid newest meta page falls back to the prior commit.
 - **Fast lookup:** an in-memory, collision-safe hash index points into the mmap.
 - **Nested buckets:** byte-key/byte-value namespaces can form arbitrary trees.
 - **Ordered traversal:** cursors, key/value iterators, bucket iterators, and ranges.
 - **Single-process ownership:** an exclusive file lock prevents unsafe concurrent opens.
-- **Small dependency surface:** the storage engine only depends on `memmap2`.
+- **Small dependency surface:** storage uses `memmap2` and `fs4`.
 
 ```rust
 use inspace::{Database, Error};
@@ -43,20 +43,19 @@ fn main() -> Result<(), Error> {
 
 ## Storage layout
 
-The first format version is an append-only transaction log:
+The current format uses fixed-size copy-on-write pages:
 
 ```text
-file header
-transaction header | records... | transaction footer
-transaction header | records... | transaction footer
-...
+meta page A | meta page B
+leaf and branch pages for commit 0
+leaf and branch pages for commit 1
+leaf and branch pages for commit 2
 ```
 
-The writer appends a complete checksummed transaction, calls `sync_data`, then
-maps the new file and publishes its records to the index. Readers keep the shared
-read lock for their callback, so their borrowed values cannot outlive or race a
-map replacement. Opening a database scans committed transactions and truncates
-only an incomplete tail.
+The writer builds and syncs new tree pages before publishing their root through
+one checksummed meta page. The other meta page retains the previous root. Nodes
+may span multiple pages for large values. Readers borrow values from the mapped
+leaf pages while holding a shared transaction lock.
 
 ## Commands
 
@@ -72,8 +71,8 @@ make verify
 
 This is a functional first engine. Before a stable 1.0, `inspace` still needs:
 
-1. page-oriented B+ trees for ordered scans and bounded startup time;
-2. copy-on-write pages plus dual meta pages for large-database commits;
+1. incremental tree updates instead of rebuilding all live records per commit;
+2. snapshot readers that remain active while a writer publishes new pages;
 3. freelist management and online/offline compaction;
 4. explicit read-only open mode and configurable mapping/page behavior;
 5. fuzzing, crash-injection tests, format compatibility tests, and comparative

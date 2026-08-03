@@ -10,8 +10,6 @@ mod cursor;
 mod data;
 mod db;
 mod error;
-mod format;
-#[allow(dead_code)]
 mod page;
 
 pub use cursor::{Buckets, Cursor, KVPairs, Range, ToBuckets, ToKVPairs};
