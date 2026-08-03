@@ -194,6 +194,33 @@ fn ttl_can_be_cleared_and_cleanup_is_bounded() -> Result<(), Error> {
 }
 
 #[test]
+fn deadline_index_orders_cleanup_and_database_cleanup_walks_nested_buckets() -> Result<(), Error> {
+    let file = common::RandomFile::new();
+    let db = DB::open(&file)?;
+    let expired = UNIX_EPOCH + Duration::from_secs(10);
+    let future = UNIX_EPOCH + Duration::from_secs(100);
+    let now = UNIX_EPOCH + Duration::from_secs(20);
+    db.update(|tx| {
+        let root = tx.create_bucket("root")?;
+        root.put_with_ttl("a-future", "keep", future)?;
+        root.put_with_ttl("z-expired", "remove", expired)?;
+        let nested = root.create_bucket("nested")?;
+        nested.put_with_ttl("expired", "remove", expired)?;
+        Ok(())
+    })?;
+
+    assert_eq!(db.purge_expired(now, 1)?, 1);
+    assert_eq!(db.purge_expired(now, 10)?, 1);
+    db.view(|tx| {
+        let root = tx.get_bucket("root")?;
+        assert!(root.get_live_at("a-future", now)?.is_some());
+        assert!(root.get_kv("z-expired").is_none());
+        assert!(root.get_bucket("nested")?.get_kv("expired").is_none());
+        Ok(())
+    })
+}
+
+#[test]
 fn oversized_change_sets_are_bounded_and_marked_truncated() -> Result<(), Error> {
     let file = common::RandomFile::new();
     let db = DB::open(&file)?;

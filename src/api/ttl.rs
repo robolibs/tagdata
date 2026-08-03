@@ -1,8 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
-    Bucket, Error, KVPair, Result, ToBytes,
-    changes::{ChangeOperation, TTL_BUCKET},
+    Bucket, DB, Error, KVPair, Result, ToBytes,
+    changes::{ChangeOperation, TTL_BUCKET, TTL_DEADLINES_BUCKET},
     node::Leaf,
 };
 
@@ -28,7 +28,14 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
         let key = key.to_bytes();
         let previous = self.put(&key, value)?.map(|pair| pair.value().to_vec());
         let expirations = self.get_or_create_bucket(TTL_BUCKET)?;
+        if let Some(previous_deadline) = expirations.get_kv(&key) {
+            let previous_deadline = decode_expiration(previous_deadline.value())?;
+            remove_deadline(self, previous_deadline, key.as_ref())?;
+        }
+        let deadline_key = deadline_key(expires_at_millis, key.as_ref());
         expirations.put(key, expires_at_millis.to_be_bytes())?;
+        self.get_or_create_bucket(TTL_DEADLINES_BUCKET)?
+            .put(deadline_key, [])?;
         Ok(TtlWriteResult {
             previous,
             expires_at_millis,
@@ -59,9 +66,13 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
 
     /// Removes a key's TTL while leaving its value intact.
     pub fn clear_ttl<K: AsRef<[u8]>>(&self, key: K) -> Result<bool> {
+        let key = key.as_ref();
         match self.get_bucket(TTL_BUCKET) {
             Ok(expirations) => match expirations.delete(key) {
-                Ok(_) => Ok(true),
+                Ok(previous) => {
+                    remove_deadline(self, decode_expiration(previous.value())?, key)?;
+                    Ok(true)
+                }
                 Err(Error::KeyValueMissing) => Ok(false),
                 Err(error) => Err(error),
             },
@@ -84,17 +95,20 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
             Err(Error::BucketMissing) => return Ok(0),
             Err(error) => return Err(error),
         };
-        let mut expired = Vec::new();
-        for pair in expirations.kv_pairs() {
-            if decode_expiration(pair.value())? <= now {
-                expired.push(pair.key().to_vec());
-                if expired.len() == limit {
-                    break;
-                }
+        let deadlines = self.deadline_index(&expirations)?;
+        let mut expired = Vec::with_capacity(limit);
+        for pair in deadlines.kv_pairs() {
+            let (deadline, key) = decode_deadline_key(pair.key())?;
+            if deadline > now {
+                break;
+            }
+            expired.push((pair.key().to_vec(), key.to_vec()));
+            if expired.len() == limit {
+                break;
             }
         }
 
-        for key in &expired {
+        for (deadline_key, key) in &expired {
             let mut bucket = self.inner.borrow_mut();
             match bucket.get(key) {
                 Some(Leaf::Kv(_, _)) => {
@@ -108,6 +122,7 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
                 None => drop(bucket),
             }
             expirations.delete(key)?;
+            deadlines.delete(deadline_key)?;
         }
         Ok(expired.len())
     }
@@ -122,6 +137,98 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
             Err(error) => Err(error),
         }
     }
+
+    fn deadline_index(&self, expirations: &Bucket<'b, 'tx>) -> Result<Bucket<'b, 'tx>> {
+        match self.get_bucket(TTL_DEADLINES_BUCKET) {
+            Ok(deadlines) => Ok(deadlines),
+            Err(Error::BucketMissing) => {
+                let deadlines = self.create_bucket(TTL_DEADLINES_BUCKET)?;
+                for pair in expirations.kv_pairs() {
+                    let deadline = decode_expiration(pair.value())?;
+                    deadlines.put(deadline_key(deadline, pair.key()), [])?;
+                }
+                Ok(deadlines)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl DB {
+    /// Removes at most `limit` expired records across every nested bucket.
+    pub fn purge_expired(&self, now: SystemTime, limit: usize) -> Result<usize> {
+        if limit == 0 {
+            return Ok(0);
+        }
+        self.update(|tx| {
+            let names = tx
+                .buckets()
+                .map(|(name, _)| name.name().to_vec())
+                .filter(|name| !is_ttl_bucket(name))
+                .collect::<Vec<_>>();
+            let mut removed = 0;
+            for name in names {
+                let bucket = tx.get_bucket(name)?;
+                removed += purge_bucket_tree(&bucket, now, limit - removed)?;
+                if removed == limit {
+                    break;
+                }
+            }
+            Ok(removed)
+        })
+    }
+}
+
+fn purge_bucket_tree(bucket: &Bucket<'_, '_>, now: SystemTime, limit: usize) -> Result<usize> {
+    if limit == 0 {
+        return Ok(0);
+    }
+    let mut removed = bucket.purge_expired(now, limit)?;
+    if removed == limit {
+        return Ok(removed);
+    }
+    let names = bucket
+        .buckets()
+        .map(|(name, _)| name.name().to_vec())
+        .filter(|name| !is_ttl_bucket(name))
+        .collect::<Vec<_>>();
+    for name in names {
+        let child = bucket.get_bucket(name)?;
+        removed += purge_bucket_tree(&child, now, limit - removed)?;
+        if removed == limit {
+            break;
+        }
+    }
+    Ok(removed)
+}
+
+fn is_ttl_bucket(name: &[u8]) -> bool {
+    name == TTL_BUCKET || name == TTL_DEADLINES_BUCKET
+}
+
+fn remove_deadline(bucket: &Bucket<'_, '_>, deadline: u64, key: &[u8]) -> Result<()> {
+    match bucket.get_bucket(TTL_DEADLINES_BUCKET) {
+        Ok(deadlines) => match deadlines.delete(deadline_key(deadline, key)) {
+            Ok(_) | Err(Error::KeyValueMissing) => Ok(()),
+            Err(error) => Err(error),
+        },
+        Err(Error::BucketMissing) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn deadline_key(deadline: u64, key: &[u8]) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(8 + key.len());
+    encoded.extend_from_slice(&deadline.to_be_bytes());
+    encoded.extend_from_slice(key);
+    encoded
+}
+
+fn decode_deadline_key(encoded: &[u8]) -> Result<(u64, &[u8])> {
+    let deadline = encoded
+        .get(..8)
+        .ok_or_else(|| Error::InvalidDB("TTL deadline key is shorter than eight bytes".into()))?;
+    Ok((decode_expiration(deadline)?, &encoded[8..]))
 }
 
 fn epoch_millis(time: SystemTime) -> Result<u64> {

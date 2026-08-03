@@ -9,6 +9,7 @@ use crate::{DB, Result};
 const MAX_CHANGES: usize = 4096;
 const MAX_CHANGE_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const TTL_BUCKET: &[u8] = b"\0inspace.ttl.v1";
+pub(crate) const TTL_DEADLINES_BUCKET: &[u8] = b"\0inspace.ttl.deadlines.v2";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ChangeOperation {
@@ -235,7 +236,10 @@ impl ChangeTracker {
     pub(crate) fn record(&mut self, path: &[Vec<u8>], key: &[u8], operation: ChangeOperation) {
         if !self.enabled
             || key == TTL_BUCKET
-            || path.iter().any(|part| part.as_slice() == TTL_BUCKET)
+            || key == TTL_DEADLINES_BUCKET
+            || path.iter().any(|part| {
+                part.as_slice() == TTL_BUCKET || part.as_slice() == TTL_DEADLINES_BUCKET
+            })
         {
             return;
         }
