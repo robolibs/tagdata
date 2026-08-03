@@ -17,7 +17,7 @@ $(info ------------------------------------------)
 $(info Project: $(PROJECT_NAME) v$(PROJECT_VERSION))
 $(info ------------------------------------------)
 
-.PHONY: build b compile c run r benchmark test t check check-all test-all clippy rustdoc fmt fmt-check clean verify release help h
+.PHONY: build b compile c run r benchmark fixtures operator package test t check check-all test-all clippy rustdoc fmt fmt-check clean verify release help h
 
 build:
 	@$(CARGO) build --lib
@@ -37,6 +37,15 @@ r: run
 
 benchmark:
 	@$(CARGO) run --release --example benchmark
+
+fixtures:
+	@$(CARGO) run --example fixture_gen
+
+operator:
+	@$(CARGO) build --release --bin inspace
+
+package:
+	@$(CARGO) package --locked
 
 test:
 	@$(CARGO) test --all-targets
@@ -89,6 +98,9 @@ help:
 	@echo "  compile      Clean and rebuild"
 	@echo "  run          Run a development example"
 	@echo "  benchmark    Run the release-mode smoke benchmark"
+	@echo "  fixtures     Regenerate frozen on-disk compatibility fixtures"
+	@echo "  operator     Build the release-mode operator CLI"
+	@echo "  package      Verify and package the locked crate"
 	@echo "  test         Run all tests"
 	@echo "  check        Run cargo check on all targets"
 	@echo "  check-all    Run cargo check on all targets/all features"

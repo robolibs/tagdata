@@ -34,3 +34,19 @@ jobs:
             cargo-${{ runner.os }}-
       - name: Verify
         run: make verify
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - name: Check MSRV
+        run: make check-all
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Package locked crate
+        run: make package

@@ -5,6 +5,12 @@ edition = "2024"
 description = "inspace"
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/robolibs/inspace"
+homepage = "https://github.com/robolibs/inspace"
+documentation = "https://docs.rs/inspace"
+keywords = ["database", "embedded", "mmap", "key-value", "transactions"]
+categories = ["database-implementations", "data-structures"]
+rust-version = "1.85"
 publish = false
 
 [lib]
