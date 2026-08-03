@@ -29,7 +29,7 @@ pub struct TypedCodec<KC, VC> {
 }
 
 impl<KC, VC> TypedCodec<KC, VC> {
-    pub fn new(key: KC, value: VC) -> Self {
+    pub const fn new(key: KC, value: VC) -> Self {
         Self { key, value }
     }
 }
@@ -144,11 +144,29 @@ pub enum CodecError {
     Encode(String),
     Decode(String),
     OrderingRequired,
+    InvalidDefinition,
+    SchemaMissing {
+        collection: &'static str,
+    },
+    SchemaMismatch {
+        collection: &'static str,
+        expected_id: &'static str,
+        expected_version: u32,
+    },
 }
 
 impl From<Error> for CodecError {
     fn from(value: Error) -> Self {
         Self::Storage(value)
+    }
+}
+
+impl From<CodecError> for crate::TransactionError<CodecError> {
+    fn from(value: CodecError) -> Self {
+        match value {
+            CodecError::Storage(error) => Self::Storage(error),
+            application => Self::Application(application),
+        }
     }
 }
 
@@ -159,6 +177,18 @@ impl fmt::Display for CodecError {
             Self::Encode(error) => write!(f, "encode error: {error}"),
             Self::Decode(error) => write!(f, "decode error: {error}"),
             Self::OrderingRequired => write!(f, "key codec does not preserve byte ordering"),
+            Self::InvalidDefinition => write!(f, "invalid collection definition"),
+            Self::SchemaMissing { collection } => {
+                write!(f, "collection {collection:?} has no schema metadata")
+            }
+            Self::SchemaMismatch {
+                collection,
+                expected_id,
+                expected_version,
+            } => write!(
+                f,
+                "collection {collection:?} does not match schema {expected_id:?} version {expected_version}"
+            ),
         }
     }
 }

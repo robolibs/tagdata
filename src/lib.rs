@@ -124,6 +124,9 @@ pub(crate) use tree::{node, page_node};
 #[cfg(feature = "typed")]
 mod typed;
 
+#[cfg(feature = "typed")]
+mod application;
+
 pub use bucket::{AtomicResult, Bucket};
 pub use changes::{Change, ChangeOperation, ChangeSet, WatchSubscription};
 pub use cursor::{Buckets, Cursor, KVPairs, ToBuckets, ToKVPairs};
@@ -137,6 +140,9 @@ pub use tx::Tx;
 
 #[cfg(feature = "typed")]
 pub use typed::*;
+
+#[cfg(feature = "typed")]
+pub use application::*;
 
 pub use crate::bytes::ToBytes;
 
