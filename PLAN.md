@@ -359,3 +359,262 @@ git diff --check
 
 No source or test file may exceed 800 lines. New unsafe code requires a documented
 safety invariant and focused corruption/bounds tests.
+
+---
+
+## Roadmap extension: application-facing API and operational maturity
+
+The storage engine is now feature-complete for the original phases. The next
+work should make Inspace pleasant and difficult to misuse when embedded across
+many different applications. The raw byte API remains supported and zero-copy;
+new typed and convenience APIs must be additive rather than hiding storage
+costs or transaction boundaries.
+
+| Phase | Work | Status | Depends on |
+|---|---|---|---|
+| 9 | Reusable application API | TODO | Phases 6-8 |
+| 10 | Portability, contention, and capacity controls | TODO | Phase 9 |
+| 11 | Operator CLI, diagnostics, and salvage | TODO | Phases 4-5 and 10 |
+| 12 | Scalable TTL and precise page reclamation | TODO | Phases 3 and 8 |
+| 13 | Optional durable change journal | TODO | Phases 8 and 12 |
+| 14 | Publication and compatibility contract | TODO | Phases 9-13 |
+
+## Phase 9: Reusable application API
+
+### Design principles
+
+1. Keep transactions explicit; convenience methods must not turn every operation
+   into an invisible transaction.
+2. Represent read and write capabilities with separate types so invalid writes
+   fail at compile time rather than at runtime.
+3. Use familiar ordered-map vocabulary: `get`, `contains_key`, `insert`,
+   `remove`, `entry`, `range`, `prefix`, `first`, and `last`.
+4. Keep raw values borrowed from the mmap. Typed codecs may return owned values,
+   but must not claim zero-copy behavior when decoding allocates.
+5. Make the common path short without removing access to buckets, nested paths,
+   cursors, atomic operations, TTL, watches, or raw bytes.
+6. Do not add a native async transaction. An application may run one complete
+   synchronous closure on its own blocking worker.
+
+### Named collection definitions
+
+Add reusable definitions that applications can declare once and use everywhere:
+
+```rust,ignore
+const USERS: CollectionDef<UserId, User, UserCodec> =
+    CollectionDef::new("users", UserCodec).schema(1);
+
+db.read(|tx| {
+    let users = tx.collection(USERS)?;
+    users.get(&user_id)
+})?;
+
+db.write(|tx| {
+    let mut users = tx.collection_mut(USERS)?;
+    users.insert(&user_id, &user)?;
+    Ok(())
+})?;
+```
+
+Requirements:
+
+- A definition contains a stable bucket path, key/value codecs, schema identity,
+  and open policy.
+- Definitions are cheap to copy and contain no transaction state.
+- `ReadCollection` exposes only reads; `WriteCollection` adds mutation methods.
+- Opening with an incompatible persisted schema or codec returns a structured
+  error before decoding user data.
+- Raw and typed collection handles can coexist in one transaction.
+- Nested paths use a reusable `BucketPath`/`CollectionPath` type instead of
+  repeatedly opening each path component by hand.
+
+### Map-like access
+
+Add these operations consistently to raw and typed collection handles:
+
+- `get`, `get_owned`, `contains_key`, and `multi_get`;
+- `insert`/`put`, returning the previous value;
+- `remove`/`delete`, returning `Ok(None)` for a missing key;
+- `first`, `last`, `pop_first`, and `pop_last`;
+- `len`, `is_empty`, and `clear` with documented traversal cost;
+- `delete_range` and `delete_prefix` with explicit write-transaction semantics;
+- `insert_many` and `remove_many`, with all changes committed atomically by the
+  enclosing transaction.
+
+Keep existing method names for compatibility. New aliases should converge on
+standard Rust collection terminology, and deprecation should wait until the new
+surface has been used by real applications.
+
+### Entry and update API
+
+Provide an `Entry` API for single-lookup manipulation:
+
+```rust,ignore
+users
+    .entry(user_id)?
+    .and_modify(|user| user.login_count += 1)?
+    .or_insert(default_user)?;
+```
+
+The entry surface should cover:
+
+- occupied and vacant matching;
+- `or_insert`, `or_insert_with`, `and_modify`, `replace`, and `remove`;
+- compare/exchange conflicts as expected outcomes, separate from storage errors;
+- numeric `fetch_add` helpers only for codecs that define an unambiguous numeric
+  representation;
+- TTL write options on the same mutation so value and expiration cannot drift.
+
+For typed values, `and_modify` decodes once and encodes once. For raw values,
+provide a closure over the current bytes without promising in-place mmap writes.
+
+### Transaction closures and application errors
+
+Generalize scoped helpers so application errors can abort without being forced
+into `inspace::Error`:
+
+```rust,ignore
+let result: Result<User, TransactionError<MyError>> = db.write(|tx| {
+    // Storage failures and domain failures remain distinguishable.
+});
+```
+
+Requirements:
+
+- distinguish storage/commit failures, expected conflicts, and application
+  errors with structured enums;
+- roll back on every closure error and panic;
+- preserve the current panic-safe mutex behavior;
+- add deadline-aware `write_tx_timeout(Duration)` and `write_timeout` helpers;
+- keep `try_write_tx()` for immediate nonblocking acquisition.
+
+### Streaming traversal
+
+Typed traversal must match the raw API's bounded-memory behavior:
+
+- lazy `iter`, `keys`, `values`, `range`, and `prefix` iterators;
+- forward and reverse traversal;
+- seek, inclusive/exclusive bounds, `take`, and resumable pagination tokens;
+- iterator items return `Result` so one decode failure identifies the failing key
+  without collecting the entire bucket;
+- existing collecting helpers remain as wrappers over streaming iterators.
+
+### Batches and multi-collection work
+
+Transactions already provide atomicity across buckets. Add a convenience batch
+surface without introducing a second transaction model:
+
+```rust,ignore
+db.write(|tx| {
+    tx.batch()
+        .insert(USERS, id, user)
+        .remove(SESSIONS, session_id)
+        .apply()?;
+    Ok(())
+})?;
+```
+
+Support ordered bulk loading as a separate optimized path. It must validate key
+ordering, preserve normal commit durability, and fall back to ordinary insertion
+when the preconditions are not met.
+
+### Filtered watches
+
+Build filters over the existing committed change-set foundation:
+
+- watch one collection or nested path;
+- optional key prefix/range and operation filters;
+- explicit `from_now` semantics for the current best-effort watch;
+- preserve transaction boundaries when only some changes match;
+- make disconnect/overflow observable through a dedicated watch error.
+
+Durable replay belongs to Phase 13 and must not be implied by this API.
+
+### API research basis
+
+The design should combine proven patterns rather than clone one database API:
+
+- [redb](https://docs.rs/redb/latest/redb/struct.Database.html)'s reusable typed
+  table definitions and transaction-scoped table handles;
+- [sled](https://docs.rs/sled/latest/sled/struct.Tree.html)'s `BTreeMap`-like
+  trees, batches, range/prefix scans, and explicit compare-and-swap outcomes;
+- [RocksDB](https://github.com/facebook/rocksdb/wiki/RocksDB-Overview)'s
+  consistent `MultiGet`, atomic `WriteBatch`, snapshots, and reversible iterators;
+- [heed](https://docs.rs/heed/latest/heed/)'s typed codecs and forward/reverse
+  range iterators over an mmap database.
+
+### Phase 9 completion criteria
+
+- A representative application can declare collections once and perform common
+  CRUD without repeating bucket names or codec plumbing.
+- Read handles cannot call mutation methods at compile time.
+- Domain errors can abort scoped writes without losing their original type.
+- Typed scans are lazy and bounded-memory.
+- Entry, batch, range, prefix, reverse, TTL, and filtered-watch behavior have
+  integration tests for raw and typed collections.
+- Property tests compare randomized operations with `BTreeMap` behavior.
+- Compile-fail tests cover capability and lifetime misuse.
+- Existing raw API tests continue to pass unchanged.
+- `make verify` and `make run` pass.
+
+## Phase 10: Portability, contention, and capacity controls
+
+- Auto-detect persisted page size and format version when opening an existing
+  database; retain an explicit forensic override and fail closed on ambiguity.
+- Expose read-only `FormatInfo` inspection without mapping the full database.
+- Add writer acquisition deadlines and a structured timeout/contention error.
+- Add `max_file_bytes` and configurable growth increments. Reject a commit before
+  publication when its required extent exceeds policy.
+- Test corrupted bootstrap metadata, cross-system page sizes, lock timeouts, and
+  capacity rejection during file growth.
+
+## Phase 11: Operator CLI, diagnostics, and salvage
+
+- Ship a separate lightweight operator binary with `info`, `stats`, `verify`,
+  `backup`, `compact`, and `migrate` commands plus stable JSON output.
+- Replace `verify() -> Result<()>` internally with structured corruption reports
+  containing page ID, offset, page kind, failed invariant, and bucket path when
+  recoverable.
+- Add conservative copy-out salvage into a new destination with a manifest of
+  skipped records/pages. Never perform automatic in-place repair.
+- Separate fast physical snapshot backup from logical compaction/migration.
+- Package the operator CLI in releases instead of the demonstration example.
+
+## Phase 12: Scalable TTL and precise page reclamation
+
+- Replace key-ordered TTL cleanup with a versioned deadline-ordered index so
+  cleanup stops at the first unexpired record.
+- Add database-level bounded expiry cleanup across nested collections.
+- Persist freelist retirement generations in a new format version and reclaim
+  only pages older than the oldest registered reader.
+- Preserve conservative reclamation for older formats and damaged coordination
+  state.
+- Benchmark long-lived readers, write churn, TTL-heavy workloads, file growth,
+  and cleanup latency before enabling the new format by default.
+
+## Phase 13: Optional durable change journal
+
+- Keep the default process-local watch lightweight and best-effort.
+- Add an opt-in journal that records complete transaction boundaries atomically
+  with the user transaction and replays from a transaction ID.
+- Specify retention, acknowledgements/checkpoints, filtering, truncation, gap
+  detection, and whether values may ever be included.
+- Support cross-process consumers without making commit latency unbounded.
+- Use the journal as the foundation for optional incremental backup, secondary
+  indexing, and replication adapters.
+
+## Phase 14: Publication and compatibility contract
+
+- Define MSRV, SemVer policy, supported platforms, and on-disk format support
+  windows.
+- Add frozen database fixtures produced by each released format version.
+- Test open/read/write/verify/migrate against frozen fixtures in CI.
+- Complete crate metadata and add `cargo package --locked` plus MSRV CI.
+- Publish only after the Phase 9 API has been exercised by multiple real
+  applications; prefer prereleases until that surface settles.
+
+## Still deferred
+
+Transparent compression, encryption at rest, native async transactions, and
+savepoints remain deferred. They should not delay the reusable application API,
+operational tooling, or storage-scale work above.
