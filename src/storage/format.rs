@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
     Error, Result,
-    db::{LATEST_FORMAT_VERSION, MAGIC_VALUE},
+    db::{FORMAT_VERSION, MAGIC_VALUE},
     meta::Meta,
     page::Page,
 };
@@ -101,26 +101,16 @@ fn inspect_candidate(file: &mut File, file_bytes: u64, page_size: u64) -> Result
 
     let mut valid = Vec::new();
     for id in 0..=1_u64 {
-        let Ok(page) = Page::validate_block(&bytes, id, page_size, 1) else {
+        let Ok(page) = Page::validate_block(&bytes, id, page_size) else {
             continue;
         };
         let current = page.meta();
         if current.valid()
             && current.magic == MAGIC_VALUE
-            && (1..=LATEST_FORMAT_VERSION).contains(&current.version)
+            && current.version == FORMAT_VERSION
             && current.pagesize == page_size
-            && Page::validate_block(&bytes, id, page_size, current.version).is_ok()
         {
             valid.push(current.clone());
-            continue;
-        }
-        let old = page.old_meta();
-        if old.valid()
-            && old.magic == MAGIC_VALUE
-            && (1..=LATEST_FORMAT_VERSION).contains(&old.version)
-            && old.pagesize == page_size
-        {
-            valid.push(old.into());
         }
     }
     let meta = valid

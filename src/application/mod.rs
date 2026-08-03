@@ -16,7 +16,7 @@ pub use definition::{CollectionDef, OpenPolicy};
 pub use entry::{CompareOutcome, Entry};
 pub use iter::{CollectionIter, PageToken, ScanPage};
 
-const SCHEMA_BUCKET: &str = "\0inspace.schema.v1";
+const SCHEMA_BUCKET: &str = "\0inspace.schema";
 
 impl<'tx> Tx<'tx> {
     /// Starts an encoded multi-collection batch in this write transaction.

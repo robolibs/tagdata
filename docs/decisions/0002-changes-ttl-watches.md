@@ -16,7 +16,7 @@ delivery. Consumers that require completeness must use transaction IDs to
 detect gaps and rescan application state. A change set preserves transaction
 boundaries and operation order.
 
-TTL uses a reserved nested bucket named `\0inspace.ttl.v1` as a persistent
+TTL uses reserved lookup and deadline buckets under the `\0inspace.ttl` prefix as a persistent
 key-to-expiration index. Expirations are unsigned Unix-epoch milliseconds.
 There is no background thread: reads can use `get_live`/`get_live_at`, while a
 writer calls bounded `purge_expired`. Cleanup emits the same committed change

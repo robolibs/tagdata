@@ -8,9 +8,9 @@ use crate::{DB, Result};
 
 const MAX_CHANGES: usize = 4096;
 const MAX_CHANGE_BYTES: usize = 4 * 1024 * 1024;
-pub(crate) const TTL_BUCKET: &[u8] = b"\0inspace.ttl.v1";
-pub(crate) const TTL_DEADLINES_BUCKET: &[u8] = b"\0inspace.ttl.deadlines.v2";
-pub(crate) const JOURNAL_BUCKET: &[u8] = b"\0inspace.journal.v1";
+pub(crate) const TTL_BUCKET: &[u8] = b"\0inspace.ttl.lookup";
+pub(crate) const TTL_DEADLINES_BUCKET: &[u8] = b"\0inspace.ttl.deadlines";
+pub(crate) const JOURNAL_BUCKET: &[u8] = b"\0inspace.journal";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ChangeOperation {

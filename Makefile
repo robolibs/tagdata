@@ -98,7 +98,7 @@ help:
 	@echo "  compile      Clean and rebuild"
 	@echo "  run          Run a development example"
 	@echo "  benchmark    Run the release-mode smoke benchmark"
-	@echo "  fixtures     Regenerate frozen on-disk compatibility fixtures"
+	@echo "  fixtures     Regenerate the frozen current-format fixture"
 	@echo "  operator     Build the release-mode operator CLI"
 	@echo "  package      Verify and package the locked crate"
 	@echo "  test         Run all tests"

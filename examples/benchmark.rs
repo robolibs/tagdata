@@ -2,7 +2,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use std::{fs, hash::Hasher, hint::black_box};
 
 use fnv::FnvHasher;
-use inspace::{DB, Error, LATEST_FORMAT_VERSION, OpenOptions};
+use inspace::{DB, Error, OpenOptions};
 use sha3::{Digest, Sha3_256};
 
 const ITEMS: u64 = 100_000;
@@ -77,7 +77,6 @@ fn benchmark_reclamation() -> Result<(), Error> {
     let path = std::env::temp_dir().join("inspace-reclamation-benchmark.db");
     let _ = fs::remove_file(&path);
     let db = OpenOptions::new()
-        .format_version(LATEST_FORMAT_VERSION)
         .num_pages(4)
         .growth_increment(4096)
         .open(&path)?;
@@ -123,7 +122,7 @@ fn benchmark_reclamation() -> Result<(), Error> {
     let removed = db.purge_expired(UNIX_EPOCH + Duration::from_secs(20), CHURN_KEYS as usize)?;
     let cleanup_elapsed = started.elapsed();
     let after = db.stats()?;
-    println!("\nv3 reclamation/TTL benchmark");
+    println!("\nreclamation/TTL benchmark");
     println!(
         "write churn:  {:>10.0} ops/s ({churn_elapsed:?})",
         (CHURN_KEYS * u64::from(ROUNDS)) as f64 / churn_elapsed.as_secs_f64()

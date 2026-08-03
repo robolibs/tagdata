@@ -1,5 +1,6 @@
 use super::*;
 use crate::testutil::RandomFile;
+use std::io::{Read, Seek, SeekFrom};
 
 #[test]
 fn test_open_options() {
@@ -12,6 +13,7 @@ fn test_open_options() {
             .open(&random_file)
             .unwrap();
         assert_eq!(db.pagesize(), 5000);
+        assert_eq!(db.inner.meta().unwrap().version, FORMAT_VERSION);
     }
     {
         let metadata = random_file.path.metadata().unwrap();
@@ -56,29 +58,28 @@ fn test_different_pagesizes_are_detected() {
 }
 
 #[test]
-fn opens_and_migrates_version_one_databases() -> Result<()> {
-    let source = RandomFile::new();
-    let destination = RandomFile::new();
-    drop(init_file_version(&source.path, 4096, 32, false, 1)?);
+fn rejects_every_non_current_format_marker() -> Result<()> {
+    let random_file = RandomFile::new();
+    drop(OpenOptions::new().pagesize(4096).open(&random_file)?);
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&random_file.path)?;
+    for id in 0..=1_u64 {
+        let mut block = vec![0; 4096];
+        file.seek(SeekFrom::Start(id * 4096))?;
+        file.read_exact(&mut block)?;
+        let page = unsafe { &mut *(&mut block[0] as *mut u8 as *mut Page) };
+        page.meta_mut().version = FORMAT_VERSION - 1;
+        page.meta_mut().hash = page.meta().hash_self();
+        seal_block(&mut block)?;
+        file.seek(SeekFrom::Start(id * 4096))?;
+        file.write_all(&block)?;
+    }
+    file.sync_all()?;
+    drop(file);
 
-    let db = OpenOptions::new().pagesize(4096).open(&source)?;
-    assert_eq!(db.inner.meta()?.version, 1);
-    let tx = db.tx(true)?;
-    tx.create_bucket("legacy")?.put("key", "value")?;
-    tx.commit()?;
-    db.verify()?;
-
-    db.compact_to(&destination.path)?;
-    let migrated = OpenOptions::new().pagesize(4096).open(&destination)?;
-    assert_eq!(migrated.inner.meta()?.version, DEFAULT_FORMAT_VERSION);
-    assert_eq!(
-        migrated
-            .tx(false)?
-            .get_bucket("legacy")?
-            .get_kv("key")
-            .unwrap()
-            .value(),
-        b"value"
-    );
-    migrated.verify()
+    assert!(FormatInfo::inspect(&random_file.path).is_err());
+    assert!(DB::open(&random_file.path).is_err());
+    Ok(())
 }

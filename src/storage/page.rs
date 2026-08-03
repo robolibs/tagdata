@@ -11,7 +11,7 @@ use sha3::{Digest, Sha3_256};
 use crate::{
     errors::{Error, Result},
     freelist::RetiredPage,
-    meta::{Meta, OldMeta},
+    meta::Meta,
     node::{Node, NodeData, NodeType},
 };
 
@@ -19,7 +19,6 @@ pub(crate) type PageID = u64;
 
 pub(crate) type PageType = u8;
 
-pub(crate) const CHECKSUM_FORMAT_VERSION: u32 = 2;
 pub(crate) const CHECKSUM_SIZE: usize = 32;
 
 #[derive(Clone)]
@@ -41,8 +40,8 @@ impl Pages {
         }
     }
 
-    pub(crate) fn validate(&self, id: PageID, version: u32) -> Result<&Page> {
-        Page::validate_block(&self.data, id, self.pagesize, version)
+    pub(crate) fn validate(&self, id: PageID) -> Result<&Page> {
+        Page::validate_block(&self.data, id, self.pagesize)
     }
 }
 
@@ -74,12 +73,7 @@ impl Page {
         }
     }
 
-    pub(crate) fn validate_block(
-        buf: &[u8],
-        id: PageID,
-        pagesize: u64,
-        version: u32,
-    ) -> Result<&Page> {
+    pub(crate) fn validate_block(buf: &[u8], id: PageID, pagesize: u64) -> Result<&Page> {
         let offset = id
             .checked_mul(pagesize)
             .ok_or_else(|| Error::InvalidDB(format!("page {id} offset overflow")))?;
@@ -126,33 +120,22 @@ impl Page {
             )));
         }
 
-        let checksum_size = checksum_size(version);
-        if block_len < size_of::<Page>() + checksum_size {
+        if block_len < size_of::<Page>() + CHECKSUM_SIZE {
             return Err(Error::InvalidDB(format!("page {id} block is too small")));
         }
-        if checksum_size > 0 {
-            verify_checksum(&buf[offset..block_end], id)?;
-        }
-        page.validate_layout(block_len - checksum_size, version)?;
+        verify_checksum(&buf[offset..block_end], id)?;
+        page.validate_layout(block_len - CHECKSUM_SIZE)?;
         Ok(page)
     }
 
-    fn validate_layout(&self, data_limit: usize, version: u32) -> Result<()> {
+    fn validate_layout(&self, data_limit: usize) -> Result<()> {
         let data_offset = std::mem::offset_of!(Page, ptr);
         match self.page_type {
             Self::TYPE_META => ensure_end(self.id, data_offset, size_of::<Meta>(), data_limit),
             Self::TYPE_FREELIST => ensure_end(
                 self.id,
                 data_offset,
-                checked_size(
-                    self.id,
-                    self.count,
-                    if version >= crate::freelist::RETIREMENT_FORMAT_VERSION {
-                        size_of::<RetiredPage>()
-                    } else {
-                        size_of::<PageID>()
-                    },
-                )?,
+                checked_size(self.id, self.count, size_of::<RetiredPage>())?,
                 data_limit,
             ),
             Self::TYPE_BRANCH => {
@@ -206,16 +189,6 @@ impl Page {
         unsafe { &*(&self.ptr as *const u64 as *const Meta) }
     }
 
-    pub(crate) fn old_meta(&self) -> &OldMeta {
-        assert_eq!(
-            self.page_type,
-            Page::TYPE_META,
-            "Did not find meta page, found {}",
-            self.page_type
-        );
-        unsafe { &*(&self.ptr as *const u64 as *const OldMeta) }
-    }
-
     pub(crate) fn meta_mut(&mut self) -> &mut Meta {
         assert_eq!(
             self.page_type,
@@ -224,32 +197,6 @@ impl Page {
             self.page_type
         );
         unsafe { &mut *(&mut self.ptr as *mut u64 as *mut Meta) }
-    }
-
-    pub(crate) fn freelist(&self) -> &[PageID] {
-        assert_eq!(
-            self.page_type,
-            Page::TYPE_FREELIST,
-            "Did not find freelist page, found {}",
-            self.page_type
-        );
-        unsafe {
-            let start = &self.ptr as *const u64 as *const PageID;
-            from_raw_parts(start, self.count as usize)
-        }
-    }
-
-    pub(crate) fn freelist_mut(&mut self) -> &mut [PageID] {
-        assert_eq!(
-            self.page_type,
-            Page::TYPE_FREELIST,
-            "Did not find freelist page, found {}",
-            self.page_type
-        );
-        unsafe {
-            let start = &self.ptr as *const u64 as *mut PageID;
-            from_raw_parts_mut(start, self.count as usize)
-        }
     }
 
     pub(crate) fn retired_pages(&self) -> &[RetiredPage] {
@@ -384,10 +331,7 @@ impl Page {
     }
 }
 
-pub(crate) fn seal_block(buf: &mut [u8], version: u32) -> Result<()> {
-    if checksum_size(version) == 0 {
-        return Ok(());
-    }
+pub(crate) fn seal_block(buf: &mut [u8]) -> Result<()> {
     if buf.len() < CHECKSUM_SIZE {
         return Err(Error::InvalidDB(
             "cannot checksum a short page block".into(),
@@ -397,10 +341,6 @@ pub(crate) fn seal_block(buf: &mut [u8], version: u32) -> Result<()> {
     let hash = Sha3_256::digest(&buf[..checksum_at]);
     buf[checksum_at..].copy_from_slice(&hash);
     Ok(())
-}
-
-pub(crate) fn checksum_size(version: u32) -> usize {
-    usize::from(version >= CHECKSUM_FORMAT_VERSION) * CHECKSUM_SIZE
 }
 
 fn verify_checksum(buf: &[u8], id: PageID) -> Result<()> {

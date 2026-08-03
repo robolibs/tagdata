@@ -28,8 +28,7 @@ use crate::{
 };
 
 pub(crate) const MAGIC_VALUE: u32 = 0x00AB_CDEF;
-pub const DEFAULT_FORMAT_VERSION: u32 = 2;
-pub const LATEST_FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 3;
 
 // Minimum number of bytes to allocate when growing the databse
 pub(crate) const MIN_ALLOC_SIZE: u64 = 8 * 1024 * 1024;
@@ -61,7 +60,6 @@ const DEFAULT_NUM_PAGES: usize = 32;
 pub struct OpenOptions {
     pagesize: Option<u64>,
     num_pages: usize,
-    format_version: Option<u32>,
     max_file_bytes: Option<u64>,
     growth_increment: u64,
     flags: DBFlags,
@@ -118,19 +116,6 @@ impl OpenOptions {
             panic!("Must have a minimum of 4 pages");
         }
         self.num_pages = num_pages;
-        self
-    }
-
-    /// Selects the on-disk format for a newly created database.
-    ///
-    /// Format 3 persists page retirement generations for precise reclamation.
-    /// Existing databases always retain their detected format.
-    pub fn format_version(mut self, version: u32) -> Self {
-        assert!(
-            (1..=LATEST_FORMAT_VERSION).contains(&version),
-            "Unsupported format version"
-        );
-        self.format_version = Some(version);
         self
     }
 
@@ -227,13 +212,7 @@ impl OpenOptions {
         let file = if self.flags.read_only {
             open_file(path, false, false, true)?
         } else if !exists {
-            init_file_version(
-                path,
-                pagesize,
-                self.num_pages,
-                self.flags.direct_writes,
-                self.format_version.unwrap_or(DEFAULT_FORMAT_VERSION),
-            )?
+            init_file(path, pagesize, self.num_pages, self.flags.direct_writes)?
         } else {
             open_file(path, false, self.flags.direct_writes, false)?
         };
@@ -272,7 +251,6 @@ impl Default for OpenOptions {
         OpenOptions {
             pagesize: None,
             num_pages: DEFAULT_NUM_PAGES,
-            format_version: None,
             max_file_bytes: None,
             growth_increment: MIN_ALLOC_SIZE,
             flags: DBFlags {
@@ -505,8 +483,8 @@ impl DBInner {
         {
             let meta = db.meta()?;
             let data = db.data.lock()?;
-            let page = Page::validate_block(&data, meta.freelist_page, pagesize, meta.version)?;
-            db.freelist.lock()?.init_page(page, meta.version);
+            let page = Page::validate_block(&data, meta.freelist_page, pagesize)?;
+            db.freelist.lock()?.init_page(page);
         }
 
         Ok(db)
@@ -532,9 +510,9 @@ impl DBInner {
     pub(crate) fn reload_freelist(&self) -> Result<()> {
         let meta = self.meta()?;
         let data = self.data.lock()?;
-        let page = Page::validate_block(&data, meta.freelist_page, self.pagesize, meta.version)?;
+        let page = Page::validate_block(&data, meta.freelist_page, self.pagesize)?;
         let mut freelist = Freelist::new();
-        freelist.init_page(page, meta.version);
+        freelist.init_page(page);
         *self.freelist.lock()? = freelist;
         Ok(())
     }
@@ -543,26 +521,24 @@ impl DBInner {
         let data = self.data.lock()?;
 
         macro_rules! check_meta {
-            ($func:ident) => {{
-                let meta1 = Page::validate_block(&data, 0, self.pagesize, 1)
+            () => {{
+                let meta1 = Page::validate_block(&data, 0, self.pagesize)
                     .ok()
-                    .map(|page| page.$func());
-                let meta2 = Page::validate_block(&data, 1, self.pagesize, 1)
+                    .map(Page::meta);
+                let meta2 = Page::validate_block(&data, 1, self.pagesize)
                     .ok()
-                    .map(|page| page.$func());
+                    .map(Page::meta);
                 let valid1 = meta1.is_some_and(|meta| {
                     meta.valid()
                         && meta.magic == MAGIC_VALUE
-                        && (1..=LATEST_FORMAT_VERSION).contains(&meta.version)
+                        && meta.version == FORMAT_VERSION
                         && meta.pagesize == self.pagesize
-                        && Page::validate_block(&data, 0, self.pagesize, meta.version).is_ok()
                 });
                 let valid2 = meta2.is_some_and(|meta| {
                     meta.valid()
                         && meta.magic == MAGIC_VALUE
-                        && (1..=LATEST_FORMAT_VERSION).contains(&meta.version)
+                        && meta.version == FORMAT_VERSION
                         && meta.pagesize == self.pagesize
-                        && Page::validate_block(&data, 1, self.pagesize, meta.version).is_ok()
                 });
                 match (valid1, valid2) {
                     (true, true) => {
@@ -581,23 +557,17 @@ impl DBInner {
             }};
         }
 
-        if let Some(meta) = check_meta!(meta) {
+        if let Some(meta) = check_meta!() {
             Ok(meta.clone())
-        } else if let Some(old_meta) = check_meta!(old_meta) {
-            Ok(old_meta.into())
         } else {
-            Err(Error::InvalidDB("no valid metadata pages".into()))
+            Err(Error::InvalidDB(
+                "no valid metadata pages for the current format".into(),
+            ))
         }
     }
 }
 
-fn init_file_version(
-    path: &Path,
-    pagesize: u64,
-    num_pages: usize,
-    direct_write: bool,
-    version: u32,
-) -> Result<File> {
+fn init_file(path: &Path, pagesize: u64, num_pages: usize, direct_write: bool) -> Result<File> {
     let mut file = open_file(path, true, direct_write, false)?;
     file.allocate(pagesize * (num_pages as u64))?;
     let mut buf = vec![0; (pagesize * 4) as usize];
@@ -614,7 +584,7 @@ fn init_file_version(
         let m = page.meta_mut();
         m.meta_page = i as u32;
         m.magic = MAGIC_VALUE;
-        m.version = version;
+        m.version = FORMAT_VERSION;
         m.pagesize = pagesize;
         m.freelist_page = 2;
         m.root = BucketMeta {
@@ -636,7 +606,7 @@ fn init_file_version(
     p.count = 0;
 
     for page in buf.chunks_exact_mut(pagesize as usize) {
-        seal_block(page, version)?;
+        seal_block(page)?;
     }
 
     file.write_all(&buf[..])?;

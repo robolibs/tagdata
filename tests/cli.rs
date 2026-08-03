@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use inspace::{DB, Error};
+use inspace::{DB, Error, FORMAT_VERSION};
 
 mod common;
 
@@ -9,7 +9,6 @@ fn operator_commands_emit_stable_json_and_create_outputs() -> Result<(), Error> 
     let source = common::RandomFile::new();
     let backup = common::RandomFile::new();
     let compact = common::RandomFile::new();
-    let migrated = common::RandomFile::new();
     let salvaged = common::RandomFile::new();
     let db = DB::open(&source)?;
     db.update(|tx| {
@@ -19,7 +18,7 @@ fn operator_commands_emit_stable_json_and_create_outputs() -> Result<(), Error> 
     drop(db);
 
     let info = command(["--json", "info", path(&source)])?;
-    assert_eq!(info["version"], 2);
+    assert_eq!(info["version"], FORMAT_VERSION);
     assert!(info["page_size"].as_u64().unwrap() >= 1024);
 
     let stats = command(["--json", "stats", path(&source)])?;
@@ -35,10 +34,6 @@ fn operator_commands_emit_stable_json_and_create_outputs() -> Result<(), Error> 
 
     command(["--json", "compact", path(&source), path(&compact), "2048"])?;
     assert_eq!(DB::open(&compact)?.pagesize(), 2048);
-
-    command(["--json", "migrate", path(&source), path(&migrated)])?;
-    DB::open(&migrated)?.verify()?;
-
     let manifest = command(["--json", "salvage", path(&source), path(&salvaged)])?;
     assert_eq!(manifest["copied_records"], 1);
     DB::open(&salvaged)?.verify()

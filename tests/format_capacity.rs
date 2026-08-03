@@ -3,7 +3,7 @@ use std::{
     io::{Seek, SeekFrom, Write},
 };
 
-use inspace::{DB, Error, FormatInfo, OpenOptions};
+use inspace::{DB, Error, FORMAT_VERSION, FormatInfo, OpenOptions};
 
 mod common;
 
@@ -22,7 +22,7 @@ fn existing_format_is_detected_without_host_page_size_assumptions() -> Result<()
 
     let info = FormatInfo::inspect(&file.path)?;
     assert_eq!(info.page_size, 5000);
-    assert_eq!(info.version, 2);
+    assert_eq!(info.version, FORMAT_VERSION);
     assert!(info.transaction_id > 0);
     assert_eq!(DB::open(&file)?.pagesize(), 5000);
     assert!(matches!(

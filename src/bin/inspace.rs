@@ -32,20 +32,9 @@ fn run() -> Result<(), (bool, String)> {
         "stats" if arguments.len() == 2 => stats(&arguments[1], json),
         "verify" if arguments.len() == 2 => verify(&arguments[1], json),
         "backup" if arguments.len() == 3 => backup(&arguments[1], &arguments[2], json),
-        "compact" if (3..=4).contains(&arguments.len()) => compact(
-            "compact",
-            &arguments[1],
-            &arguments[2],
-            arguments.get(3),
-            json,
-        ),
-        "migrate" if (3..=4).contains(&arguments.len()) => compact(
-            "migrate",
-            &arguments[1],
-            &arguments[2],
-            arguments.get(3),
-            json,
-        ),
+        "compact" if (3..=4).contains(&arguments.len()) => {
+            compact(&arguments[1], &arguments[2], arguments.get(3), json)
+        }
         "salvage" if arguments.len() == 3 => salvage(&arguments[1], &arguments[2], json),
         _ => Err(usage().into()),
     };
@@ -113,7 +102,6 @@ fn backup(source: &str, destination: &str, json: bool) -> Result<(), String> {
 }
 
 fn compact(
-    command: &str,
     source: &str,
     destination: &str,
     page_size: Option<&String>,
@@ -133,7 +121,7 @@ fn compact(
         None => db.compact_to(destination),
     }
     .map_err(|error| error.to_string())?;
-    success(command, destination, json);
+    success("compact", destination, json);
     Ok(())
 }
 
@@ -272,5 +260,5 @@ fn string(value: &str) -> String {
 }
 
 fn usage() -> &'static str {
-    "usage: inspace [--json] <info|stats|verify> <database>\n       inspace [--json] <backup|salvage> <source> <destination>\n       inspace [--json] <compact|migrate> <source> <destination> [page-size]"
+    "usage: inspace [--json] <info|stats|verify> <database>\n       inspace [--json] <backup|salvage> <source> <destination>\n       inspace [--json] compact <source> <destination> [page-size]"
 }

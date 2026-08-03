@@ -7,7 +7,7 @@ without weakening its compact byte-oriented API or zero-copy read path.
 
 ## Constraints
 
-- Preserve the existing on-disk format until a versioned migration is available.
+- Maintain one current on-disk format; reject any other format marker.
 - Keep safe durability as the default.
 - Support many readers and one writer, including across processes.
 - Never reclaim a page that is visible to an active snapshot.
@@ -25,7 +25,7 @@ without weakening its compact byte-oriented API or zero-copy read path.
 | 2 | Genuine read-only opening | DONE | Phase 0 |
 | 3 | Multi-process readers and one writer | DONE | Phases 1-2 |
 | 4 | Snapshot backup and offline compaction | DONE | Phase 3 |
-| 5 | Versioned pages and checksums | DONE | Phase 0 |
+| 5 | Checksummed current format | DONE | Phase 0 |
 | 6 | Transaction ergonomics and atomic operations | DONE | Phase 0 |
 | 7 | Optional typed codec layer | DONE | Phase 6 |
 | 8 | Change tracking, TTL, and watches | DONE | Phases 3 and 6 |
@@ -207,18 +207,17 @@ db.compact_to("compact.db")?;
 - Interrupted backup or compaction never damages the source database.
 - `make verify` passes.
 
-## Phase 5: Versioned pages and checksums
+## Phase 5: Checksummed current format
 
 ### Work
 
-1. Define a new format version rather than silently changing page headers.
+1. Define one explicit current format rather than interpreting unknown layouts.
 2. Add checksums for every persisted page or overflow block.
 3. Validate page ranges, sizes, counts, and overflow spans before unsafe access.
 4. Return structured corruption errors instead of panicking where possible.
 5. Expose a supported `DB::verify()` operation.
 6. Add an offline verification command or example.
-7. Provide either read compatibility with the current format or an explicit
-   migration through backup/compaction.
+7. Reject non-current format markers instead of carrying unused compatibility code.
 8. Benchmark checksum algorithms and verification policies.
 
 ### Completion criteria
@@ -226,7 +225,7 @@ db.compact_to("compact.db")?;
 - Single-bit corruption in metadata, branches, leaves, freelists, keys, and
   values is detected reliably.
 - Corrupt offsets cannot cause out-of-bounds mmap interpretation.
-- Existing databases have a documented migration path.
+- The current format and its rejection behavior are documented.
 - `make verify` passes.
 
 ## Phase 6: Transaction ergonomics and atomic operations
@@ -571,26 +570,25 @@ The design should combine proven patterns rather than clone one database API:
 ## Phase 11: Operator CLI, diagnostics, and salvage
 
 - Ship a separate lightweight operator binary with `info`, `stats`, `verify`,
-  `backup`, `compact`, and `migrate` commands plus stable JSON output.
+  `backup`, and `compact` commands plus stable JSON output.
 - Replace `verify() -> Result<()>` internally with structured corruption reports
   containing page ID, offset, page kind, failed invariant, and bucket path when
   recoverable.
 - Add conservative copy-out salvage into a new destination with a manifest of
   skipped records/pages. Never perform automatic in-place repair.
-- Separate fast physical snapshot backup from logical compaction/migration.
+- Separate fast physical snapshot backup from logical compaction.
 - Package the operator CLI in releases instead of the demonstration example.
 
 ## Phase 12: Scalable TTL and precise page reclamation
 
-- Replace key-ordered TTL cleanup with a versioned deadline-ordered index so
+- Replace key-ordered TTL cleanup with a deadline-ordered index so
   cleanup stops at the first unexpired record.
 - Add database-level bounded expiry cleanup across nested collections.
-- Persist freelist retirement generations in a new format version and reclaim
+- Persist freelist retirement generations in the current format and reclaim
   only pages older than the oldest registered reader.
-- Preserve conservative reclamation for older formats and damaged coordination
-  state.
+- Fail conservatively when coordination state is damaged.
 - Benchmark long-lived readers, write churn, TTL-heavy workloads, file growth,
-  and cleanup latency before enabling the new format by default.
+  and cleanup latency.
 
 ## Phase 13: Optional durable change journal
 
@@ -605,10 +603,9 @@ The design should combine proven patterns rather than clone one database API:
 
 ## Phase 14: Publication and compatibility contract
 
-- Define MSRV, SemVer policy, supported platforms, and on-disk format support
-  windows.
-- Add frozen database fixtures produced by each released format version.
-- Test open/read/write/verify/migrate against frozen fixtures in CI.
+- Define MSRV, SemVer policy, supported platforms, and the single-format policy.
+- Add one frozen database fixture for the current format.
+- Test open/read/write/verify against the frozen fixture in CI.
 - Complete crate metadata and add `cargo package --locked` plus MSRV CI.
 - Publish only after the Phase 9 API has been exercised by multiple real
   applications; prefer prereleases until that surface settles.

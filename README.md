@@ -23,7 +23,7 @@ See [acknowledgments](ACKOLEGMENT.md) for prior work that informed the project.
   available through `DB::stats()`.
 - **Operational snapshots:** validated backups and compact copies can be written
   without stopping concurrent writers.
-- **Checksummed format:** format-v2 databases authenticate every persisted page
+- **Checksummed format:** every database authenticates each persisted page
   and overflow block and expose full offline verification.
 
 ```rust
@@ -155,22 +155,17 @@ Use `DB::backup_to` for an atomically published snapshot, `DB::backup_writer` to
 stream a snapshot, and `DB::compact_to` to rewrite only live data into a smaller
 file. Maintenance operations never replace the source database.
 
-New databases use format version 2. Each allocated page block ends with a
+Inspace has one current on-disk format. Each allocated page block ends with a
 SHA3-256 checksum covering its header and payload. Page bounds, element counts,
 offsets, overflow spans, tree ordering, and reachability are checked by
 `DB::verify()`. `OpenOptions::verify_on_open(true)` performs that full walk while
 opening. Normal commits checksum only dirty blocks; reads retain the mmap-backed
 zero-copy path, so full verification remains an explicit policy choice.
 
-Format version 3 is available explicitly with
-`OpenOptions::format_version(LATEST_FORMAT_VERSION)`. It persists each freed
-page's retirement transaction and only reclaims pages older than the oldest
-registered reader. Version 2 remains the default while the long-reader and
-write-churn benchmark results are evaluated.
-
-Format-version-1 files remain readable and writable. They do not gain checksums
-in place. Use `compact_to` (or `backup_to`) to produce a validated version-2
-copy, then switch files using the deployment's own guarded replacement process.
+The format persists each freed page's retirement transaction and only reclaims
+pages older than the oldest registered reader. There is no format-selection API
+or legacy-format compatibility path. Files whose format marker differs from the
+current `FORMAT_VERSION` are rejected.
 
 Offline verification uses a read-only handle:
 
@@ -180,7 +175,7 @@ cargo run --example verify -- data.db
 cargo run --example verify -- data.db 8192
 ```
 
-`make benchmark` reports full-verification time, v3 long-reader/write-churn
+`make benchmark` reports full-verification time, long-reader/write-churn
 growth, deadline-index TTL cleanup latency, and compares the selected
 SHA3-256 checksum with FNV-1a-64 over the same file. SHA3-256 is used on disk for
 substantially stronger corruption detection; the benchmark keeps that cost

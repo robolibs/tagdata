@@ -22,21 +22,20 @@ literal would otherwise freeze their fields.
 The operator CLI's documented commands and JSON field names follow the same
 policy. Human-readable output may gain detail in a compatible release.
 
-## On-disk formats
+## On-disk format
 
-- Formats 1 and 2 remain readable, writable, verifiable, and migratable.
-- Format 2 is the default and authenticates page blocks with SHA3-256.
-- Format 3 is opt-in and persists page retirement generations.
-- A released format remains supported for at least two subsequent minor
-  releases and at least 12 months after a successor becomes the default,
-  whichever is longer.
-- Removing write support requires a major release. Read and migration support
-  should be retained whenever technically safe.
-- Opening never upgrades a file in place. Logical compaction/migration writes a
-  new destination; deployment controls replacement of the source.
+The project has one current on-disk format. It authenticates page blocks with
+SHA3-256 and persists page retirement generations. New databases always use it;
+there is no format-selection API and no legacy read, write, or migration path.
+Opening rejects any other format marker.
 
-Frozen fixtures under `tests/fixtures` are generated for each released format.
-CI opens, reads, writes, verifies, and migrates copies of every fixture.
+Before the first stable release, the format may change without compatibility
+code because this project has no deployed database compatibility commitment.
+After a stable release, any future format policy must be designed explicitly
+rather than pre-emptively carrying unused legacy branches now.
+
+The frozen fixture at `tests/fixtures/current.db` is regenerated whenever the
+current layout intentionally changes. CI opens, reads, writes, and verifies it.
 
 ## Publication gate
 

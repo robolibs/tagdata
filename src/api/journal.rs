@@ -8,7 +8,7 @@ use crate::{
 const CONFIG_KEY: &[u8] = b"config";
 const TX_PREFIX: u8 = b't';
 const CHECKPOINT_PREFIX: u8 = b'c';
-const MAGIC: &[u8; 4] = b"ISJ1";
+const MAGIC: &[u8; 4] = b"ISJR";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct JournalConfig {

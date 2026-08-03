@@ -134,7 +134,7 @@ pub use bucket::{AtomicResult, Bucket};
 pub use changes::{Change, ChangeOperation, ChangeSet, WatchError, WatchFilter, WatchSubscription};
 pub use cursor::{Buckets, Cursor, KVPairs, ToBuckets, ToKVPairs};
 pub use data::*;
-pub use db::{DB, DEFAULT_FORMAT_VERSION, LATEST_FORMAT_VERSION, OpenOptions};
+pub use db::{DB, FORMAT_VERSION, OpenOptions};
 pub use errors::*;
 pub use format::FormatInfo;
 pub use journal::{JournalConfig, JournalGap, JournalReplay};

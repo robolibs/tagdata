@@ -17,7 +17,7 @@ use crate::{
     changes::{ChangeOperation, ChangeTracker},
     coordination::{GateGuard, ReaderRegistration},
     cursor::ToBuckets,
-    db::DB,
+    db::{DB, FORMAT_VERSION},
     errors::{Error, Result},
     freelist::TxFreelist,
     meta::Meta,
@@ -216,13 +216,7 @@ impl<'tx> Tx<'tx> {
             let mut meta = db.inner.meta()?;
             debug_assert!(meta.valid());
             meta.tx_id += 1;
-            if meta.version >= crate::freelist::RETIREMENT_FORMAT_VERSION {
-                freelist.release(oldest_reader.unwrap_or(meta.tx_id));
-            } else if oldest_reader.is_some() {
-                freelist.defer_all(meta.tx_id);
-            } else {
-                freelist.release(meta.tx_id);
-            }
+            freelist.release(oldest_reader.unwrap_or(meta.tx_id));
             (TxLock::Rw(lock), meta, freelist)
         } else {
             let (meta, registration) = match &db.inner.coordination {
@@ -256,7 +250,7 @@ impl<'tx> Tx<'tx> {
 
         let data = db.inner.data.lock()?.clone();
         let pages = Pages::new(data, db.inner.pagesize);
-        let num_freelist_pages = pages.validate(meta.freelist_page, meta.version)?.overflow + 1;
+        let num_freelist_pages = pages.validate(meta.freelist_page)?.overflow + 1;
         let root = InnerBucket::from_meta(meta.root, pages.clone());
         let root = Rc::new(RefCell::new(root));
         let inner = TxInner {
@@ -446,19 +440,13 @@ impl<'tx> TxInner<'tx> {
             // Write the freelist to a new page
             {
                 freelist.free(self.meta.freelist_page, self.num_freelist_pages);
-                let freelist_size = freelist.inner.size(self.meta.version);
+                let freelist_size = freelist.inner.size();
                 let page = freelist.allocate(freelist_size)?;
                 self.meta.freelist_page = page.id;
                 page.page_type = Page::TYPE_FREELIST;
-                if self.meta.version >= crate::freelist::RETIREMENT_FORMAT_VERSION {
-                    let entries = freelist.inner.entries();
-                    page.count = entries.len() as u64;
-                    page.retired_pages_mut().copy_from_slice(&entries);
-                } else {
-                    let page_ids = freelist.inner.pages();
-                    page.count = page_ids.len() as u64;
-                    page.freelist_mut().copy_from_slice(&page_ids);
-                }
+                let entries = freelist.inner.entries();
+                page.count = entries.len() as u64;
+                page.retired_pages_mut().copy_from_slice(&entries);
             }
 
             // Update our num_pages from the freelist now that we've allocated everything
@@ -499,7 +487,7 @@ impl<'tx> TxInner<'tx> {
                 // the random seeks.
                 for (page_id, (ptr, size)) in freelist.pages.iter() {
                     let buf = unsafe { std::slice::from_raw_parts_mut(ptr.as_ptr(), *size) };
-                    seal_block(buf, self.meta.version)?;
+                    seal_block(buf)?;
                     file.seek(SeekFrom::Start(self.db.inner.pagesize * page_id))?;
                     file.write_all(buf)?;
                 }
@@ -527,14 +515,14 @@ impl<'tx> TxInner<'tx> {
                 let m = page.meta_mut();
                 m.meta_page = meta_page_id as u32;
                 m.magic = self.meta.magic;
-                m.version = self.meta.version;
+                m.version = FORMAT_VERSION;
                 m.pagesize = self.meta.pagesize;
                 m.root = self.meta.root;
                 m.num_pages = self.meta.num_pages;
                 m.freelist_page = self.meta.freelist_page;
                 m.tx_id = self.meta.tx_id;
                 m.hash = m.hash_self();
-                seal_block(&mut buf, self.meta.version)?;
+                seal_block(&mut buf)?;
 
                 file.seek(SeekFrom::Start(self.db.inner.pagesize * meta_page_id))?;
                 file.write_all(buf.as_slice())?;
@@ -582,7 +570,7 @@ impl<'tx> TxInner<'tx> {
                     page_id,
                 )));
             }
-            let page = self.pages.validate(page_id, self.meta.version)?;
+            let page = self.pages.validate(page_id)?;
             // Make sure none of the overflow pages have been used
             for i in 0..page.overflow {
                 let page_id = page_id + i + 1;
@@ -653,25 +641,20 @@ impl<'tx> TxInner<'tx> {
                         )));
                     }
                     // "visit" all freelist pages (we don't actually care what data is in these pages)
-                    let free_pages =
-                        if self.meta.version >= crate::freelist::RETIREMENT_FORMAT_VERSION {
-                            let entries = page.retired_pages();
-                            if let Some(entry) = entries
-                                .iter()
-                                .find(|entry| entry.retired_tx_id > self.meta.tx_id)
-                            {
-                                return Err(Error::InvalidDB(format!(
-                                    "Page {} has future retirement transaction {}",
-                                    entry.page_id, entry.retired_tx_id
-                                )));
-                            }
-                            entries
-                                .iter()
-                                .map(|entry| entry.page_id)
-                                .collect::<Vec<_>>()
-                        } else {
-                            page.freelist().to_vec()
-                        };
+                    let entries = page.retired_pages();
+                    if let Some(entry) = entries
+                        .iter()
+                        .find(|entry| entry.retired_tx_id > self.meta.tx_id)
+                    {
+                        return Err(Error::InvalidDB(format!(
+                            "Page {} has future retirement transaction {}",
+                            entry.page_id, entry.retired_tx_id
+                        )));
+                    }
+                    let free_pages = entries
+                        .iter()
+                        .map(|entry| entry.page_id)
+                        .collect::<Vec<_>>();
                     for page_id in free_pages {
                         if !unused_pages.remove(&page_id) {
                             return Err(Error::InvalidDB(format!(

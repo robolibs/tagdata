@@ -10,10 +10,8 @@ use bumpalo::Bump;
 use crate::{
     Result,
     meta::Meta,
-    page::{Page, PageID, checksum_size},
+    page::{CHECKSUM_SIZE, Page, PageID},
 };
-
-pub(crate) const RETIREMENT_FORMAT_VERSION: u32 = 3;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -54,7 +52,7 @@ impl<'a> TxFreelist {
             size_of::<Page>(),
             bytes < (size_of::<Page>() as u64)
         );
-        let required_bytes = bytes + checksum_size(self.meta.version) as u64;
+        let required_bytes = bytes + CHECKSUM_SIZE as u64;
         let num_pages = if required_bytes % self.meta.pagesize == 0 {
             required_bytes / self.meta.pagesize
         } else {
@@ -69,17 +67,11 @@ impl<'a> TxFreelist {
             }
         };
 
-        let stored_bytes = if checksum_size(self.meta.version) > 0 {
-            num_pages * self.meta.pagesize
-        } else {
-            bytes
-        };
+        let stored_bytes = num_pages * self.meta.pagesize;
         let ptr = self
             .arena
             .alloc_layout(Layout::from_size_align(stored_bytes as usize, 8)?);
-        if checksum_size(self.meta.version) > 0 {
-            unsafe { std::ptr::write_bytes(ptr.as_ptr(), 0, stored_bytes as usize) };
-        }
+        unsafe { std::ptr::write_bytes(ptr.as_ptr(), 0, stored_bytes as usize) };
 
         let page = unsafe { &mut *(ptr.as_ptr() as *mut Page) };
         page.id = page_id;
@@ -97,7 +89,6 @@ pub(crate) struct Freelist {
 }
 
 const HEADER_SIZE: u64 = size_of::<Page>() as u64;
-const PAGE_ID_SIZE: u64 = size_of::<PageID>() as u64;
 
 impl Freelist {
     pub(crate) fn new() -> Freelist {
@@ -115,14 +106,6 @@ impl Freelist {
         self.pending_pages.values().map(Vec::len).sum::<usize>() as u64
     }
 
-    pub(crate) fn defer_all(&mut self, tx_id: u64) {
-        if self.free_pages.is_empty() {
-            return;
-        }
-        let pages = self.pending_pages.entry(tx_id).or_default();
-        pages.extend(std::mem::take(&mut self.free_pages));
-    }
-
     pub(crate) fn init(&mut self, entries: &[RetiredPage]) {
         for entry in entries {
             if entry.retired_tx_id == 0 {
@@ -136,20 +119,8 @@ impl Freelist {
         }
     }
 
-    pub(crate) fn init_page(&mut self, page: &Page, version: u32) {
-        if version >= RETIREMENT_FORMAT_VERSION {
-            self.init(page.retired_pages());
-        } else {
-            let entries = page
-                .freelist()
-                .iter()
-                .map(|page_id| RetiredPage {
-                    page_id: *page_id,
-                    retired_tx_id: 0,
-                })
-                .collect::<Vec<_>>();
-            self.init(&entries);
-        }
+    pub(crate) fn init_page(&mut self, page: &Page) {
+        self.init(page.retired_pages());
     }
 
     // adds the page to the transaction's set of free pages
@@ -245,14 +216,9 @@ impl Freelist {
         entries
     }
 
-    pub(crate) fn size(&self, version: u32) -> u64 {
+    pub(crate) fn size(&self) -> u64 {
         let count = self.pages().len() as u64;
-        let entry_size = if version >= RETIREMENT_FORMAT_VERSION {
-            size_of::<RetiredPage>() as u64
-        } else {
-            PAGE_ID_SIZE
-        };
-        HEADER_SIZE + (entry_size * count)
+        HEADER_SIZE + (size_of::<RetiredPage>() as u64 * count)
     }
 }
 
@@ -363,8 +329,7 @@ mod tests {
     #[test]
     fn test_size() {
         let freelist = freelist_from_vec(vec![1, 2, 3]);
-        assert_eq!(freelist.size(2), HEADER_SIZE + (PAGE_ID_SIZE * 3));
-        assert_eq!(freelist.size(3), HEADER_SIZE + (16 * 3));
+        assert_eq!(freelist.size(), HEADER_SIZE + (16 * 3));
     }
 
     #[test]
@@ -397,7 +362,7 @@ mod tests {
         // make sure we have an empty freelist and only four pages
         assert_eq!(freelist.inner.pages().len(), 0);
         assert_eq!(tx.meta.num_pages, 4);
-        // Version 2 reserves the final 32 bytes of each block for its checksum.
+        // The final 32 bytes of each block are reserved for its checksum.
         let page = freelist.allocate(1024 - 32)?;
         assert!(page.id == 4);
         assert!(page.overflow == 0);
