@@ -1,6 +1,6 @@
 # inspace
 
-`inspace` is an embedded, single-file, memory-mapped key/value database for Rust.
+`inspace` is an embedded, single-data-file, memory-mapped key/value database for Rust.
 
 See [acknowledgments](ACKOLEGMENT.md) for prior work that informed the project.
 
@@ -24,7 +24,7 @@ See [acknowledgments](ACKOLEGMENT.md) for prior work that informed the project.
 - **Operational snapshots:** validated backups and compact copies can be written
   without stopping concurrent writers.
 - **Checksummed format:** every database authenticates each persisted page
-  and overflow block and expose full offline verification.
+  and overflow block and exposes full offline verification.
 
 ```rust
 use inspace::{DB, Error};
@@ -48,7 +48,7 @@ fn main() -> Result<(), Error> {
 ```
 
 New code can use `read_tx()`, `write_tx()`, and nonblocking `try_write_tx()`
-instead of the compatibility `tx(bool)` method. `view` and `update` scope a
+instead of the lower-level `tx(bool)` method. `view` and `update` scope a
 synchronous closure; `update` commits only when the closure returns `Ok` and
 rolls back on errors or panics. Transactions are synchronous and must not cross
 an async suspension point.
@@ -121,11 +121,11 @@ for transaction in replay.transactions {
 Replay preserves transaction boundaries and supports the same filters as
 watches. Retention is transaction-count based. Consumer checkpoints are durable
 but do not pin history; `JournalReplay::gap` reports when retention passed a
-requested transaction. Version 1 journals keys and operation metadata, never
-values. Tracking remains bounded to 4,096 changes or 4 MiB per transaction, and
-oversized records carry `truncated = true`. Cross-process consumers poll replay
-by transaction ID, which also provides the base contract for secondary indexes,
-incremental backup, and replication adapters.
+requested transaction. Journal records contain keys and operation metadata,
+never values. Tracking remains bounded to 4,096 changes or 4 MiB per
+transaction, and oversized records carry `truncated = true`. Cross-process
+consumers poll replay by transaction ID, which also provides the base contract
+for secondary indexes, incremental backup, and replication adapters.
 
 ## Storage layout
 

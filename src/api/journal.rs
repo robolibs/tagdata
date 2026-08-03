@@ -39,7 +39,7 @@ pub struct JournalReplay {
 }
 
 impl DB {
-    /// Enables the durable journal. Version 1 records metadata only, never values.
+    /// Enables the durable journal. Records contain metadata only, never values.
     pub fn enable_journal(&self, config: JournalConfig) -> Result<()> {
         if config.max_transactions == 0 {
             return Err(invalid("journal retention must be non-zero"));
