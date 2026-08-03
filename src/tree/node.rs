@@ -117,9 +117,11 @@ impl<'n> Node<'n> {
         match &mut self.data {
             NodeData::Branches(branches) => {
                 debug_assert!(!self.children.contains(&id));
-                debug_assert!(branches
-                    .binary_search_by_key(&key.as_ref(), |b| b.key())
-                    .is_ok());
+                debug_assert!(
+                    branches
+                        .binary_search_by_key(&key.as_ref(), |b| b.key())
+                        .is_ok()
+                );
                 self.children.push(id);
             }
             NodeData::Leaves(_) => panic!("CANNOT INSERT BRANCH INTO A LEAF NODE"),
@@ -539,8 +541,8 @@ mod test {
 
     use super::*;
     use crate::{
-        testutil::{rand_bytes, RandomFile},
         OpenOptions,
+        testutil::{RandomFile, rand_bytes},
     };
 
     #[test]

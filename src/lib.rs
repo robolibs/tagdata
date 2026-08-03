@@ -111,25 +111,20 @@
 //! }
 //!
 
-#[allow(clippy::mutable_key_type)]
-mod bucket;
-mod bytes;
-mod cursor;
-mod data;
-mod db;
-mod errors;
-mod freelist;
-mod lifetimes;
-mod meta;
-mod node;
-mod page;
-mod page_node;
-mod tx;
+mod api;
+mod storage;
+mod support;
+mod tree;
+
+pub(crate) use api::{bucket, cursor, data, tx};
+pub(crate) use storage::{db, freelist, meta, page};
+pub(crate) use support::{bytes, errors};
+pub(crate) use tree::{node, page_node};
 
 pub use bucket::Bucket;
 pub use cursor::{Buckets, Cursor, KVPairs, ToBuckets, ToKVPairs};
 pub use data::*;
-pub use db::{OpenOptions, DB};
+pub use db::{DB, OpenOptions};
 pub use errors::*;
 pub use tx::Tx;
 
@@ -145,7 +140,7 @@ mod testutil {
     use std::io::Write;
 
     use bytes::{BufMut, Bytes, BytesMut};
-    use rand::{distributions::Alphanumeric, Rng};
+    use rand::{Rng, distributions::Alphanumeric};
 
     pub struct RandomFile {
         pub path: std::path::PathBuf,

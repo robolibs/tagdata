@@ -8,9 +8,9 @@ use std::{
 use bumpalo::Bump;
 
 use crate::{
+    Result,
     meta::Meta,
     page::{Page, PageID},
-    Result,
 };
 
 pub(crate) struct TxFreelist {
@@ -178,7 +178,7 @@ impl Freelist {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{errors::Result, testutil::RandomFile, OpenOptions};
+    use crate::{OpenOptions, errors::Result, testutil::RandomFile};
 
     fn freelist_from_vec(v: Vec<PageID>) -> Freelist {
         let mut freelist = Freelist {

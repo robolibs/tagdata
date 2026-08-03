@@ -217,7 +217,7 @@ impl DB {
     /// Creates a [`Tx`].
     /// This transaction is either read-only or writable depending on the `writable` parameter.
     /// Please read the docs on a [`Tx`] for more details.
-    pub fn tx(&self, writable: bool) -> Result<Tx> {
+    pub fn tx(&self, writable: bool) -> Result<Tx<'_>> {
         Tx::new(self, writable)
     }
 

@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use crate::{bytes::Bytes, node::Leaf, ToBytes};
+use crate::{ToBytes, bytes::Bytes, node::Leaf};
 
 /// Key / Value or Bucket Data
 ///
@@ -44,7 +44,7 @@ impl<'b, 'tx> Data<'b, 'tx> {
     /// Asserts that the `Data` is a `KVPair` and returns the inner data
     ///
     /// Panics if the data is a Bucket.
-    pub fn kv(&self) -> &KVPair {
+    pub fn kv(&self) -> &KVPair<'_, '_> {
         if let Self::KeyValue(kv) = self {
             return kv;
         }

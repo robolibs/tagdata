@@ -6,12 +6,12 @@ use std::{
 };
 
 use crate::{
+    BucketName, KVPair,
     bucket::{Bucket, InnerBucket},
     data::Data,
     freelist::TxFreelist,
     page::PageID,
     page_node::PageNodeID,
-    BucketName, KVPair,
 };
 
 /// An iterator over a bucket

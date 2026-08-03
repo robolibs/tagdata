@@ -9,6 +9,7 @@ use std::{
 };
 
 use crate::{
+    BucketName,
     bucket::{Bucket, BucketMeta, InnerBucket},
     bytes::ToBytes,
     cursor::ToBuckets,
@@ -18,19 +19,18 @@ use crate::{
     meta::Meta,
     node::Node,
     page::{Page, PageID, Pages},
-    BucketName,
 };
 
 pub(crate) enum TxLock<'tx> {
     Rw(MutexGuard<'tx, File>),
-    Ro(RwLockReadGuard<'tx, ()>),
+    Ro { _guard: RwLockReadGuard<'tx, ()> },
 }
 
 impl<'tx> TxLock<'tx> {
     fn writable(&self) -> bool {
         match self {
             Self::Rw(_) => true,
-            Self::Ro(_) => false,
+            Self::Ro { .. } => false,
         }
     }
 }
@@ -112,7 +112,9 @@ impl<'tx> Tx<'tx> {
     pub(crate) fn new(db: &'tx DB, writable: bool) -> Result<Tx<'tx>> {
         let lock = match writable {
             true => TxLock::Rw(db.inner.file.lock()?),
-            false => TxLock::Ro(db.inner.mmap_lock.read()?),
+            false => TxLock::Ro {
+                _guard: db.inner.mmap_lock.read()?,
+            },
         };
         let mut freelist = db.inner.freelist.lock()?.clone();
         let mut meta = db.inner.meta()?;
@@ -415,7 +417,7 @@ impl<'tx> TxInner<'tx> {
                                 return Err(Error::InvalidDB(format!(
                                     "Page {} index {} has an invalid leaf node type {}",
                                     page_id, i, leaf.node_type,
-                                )))
+                                )));
                             }
                         }
                         // Make sure all leaf elements are in order
@@ -457,7 +459,7 @@ impl<'tx> TxInner<'tx> {
                     return Err(Error::InvalidDB(format!(
                         "Invalid page type {} for page {}",
                         page.page_type, page_id,
-                    )))
+                    )));
                 }
             }
         }
@@ -493,7 +495,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        db::{OpenOptions, DB},
+        db::{DB, OpenOptions},
         testutil::RandomFile,
     };
 
