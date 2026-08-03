@@ -121,6 +121,9 @@ pub(crate) use storage::{coordination, db, freelist, meta, page, stats};
 pub(crate) use support::{bytes, errors};
 pub(crate) use tree::{node, page_node};
 
+#[cfg(feature = "typed")]
+mod typed;
+
 pub use bucket::{AtomicResult, Bucket};
 pub use cursor::{Buckets, Cursor, KVPairs, ToBuckets, ToKVPairs};
 pub use data::*;
@@ -128,6 +131,9 @@ pub use db::{DB, OpenOptions};
 pub use errors::*;
 pub use stats::Stats;
 pub use tx::Tx;
+
+#[cfg(feature = "typed")]
+pub use typed::*;
 
 pub use crate::bytes::ToBytes;
 

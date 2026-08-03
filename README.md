@@ -59,6 +59,26 @@ mutation applied plus the observed and resulting values. For
 `compare_exchange`, an expected value of `None` matches a missing key. A missing
 key is a conflict for `delete_if_value`.
 
+## Typed codecs
+
+The raw byte API remains the default and adds no serialization dependency.
+Enable `typed` for `KeyCodec`, `ValueCodec`, and `TypedBucket<K, V, C>`:
+
+```toml
+inspace = { version = "0.1", features = ["typed"] }
+```
+
+The built-in unsigned, sign-bit-adjusted signed, UTF-8 string, byte-vector, and
+compound-string key codecs preserve lexicographic ordering. Typed ranges reject
+codecs that do not declare ordering preservation. Decoding returns owned values;
+only the raw API claims mmap-backed zero-copy reads. `serde-codec` additionally
+enables the opt-in MessagePack value codec.
+
+Codec selection is part of an application's schema. Store a schema/version key
+in the containing raw bucket (or use versioned bucket names), migrate values in
+a write transaction, and never change a live bucket's codec without rewriting
+all entries. Raw and typed views may coexist when they follow the same schema.
+
 ## Storage layout
 
 The format uses fixed-size pages:
