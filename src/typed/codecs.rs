@@ -1,4 +1,5 @@
 use super::{CodecError, KeyCodec, ValueCodec};
+use crate::{NumericValueCodec, TypedCodec};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct U64Codec;
@@ -25,6 +26,10 @@ impl ValueCodec<u64> for U64Codec {
     }
 }
 
+impl NumericValueCodec<u64> for U64Codec {}
+
+impl<KC> NumericValueCodec<u64> for TypedCodec<KC, U64Codec> {}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct I64Codec;
 
@@ -49,6 +54,10 @@ impl ValueCodec<i64> for I64Codec {
         Ok(i64::from_be_bytes(fixed(bytes, "i64 value")?))
     }
 }
+
+impl NumericValueCodec<i64> for I64Codec {}
+
+impl<KC> NumericValueCodec<i64> for TypedCodec<KC, I64Codec> {}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StringCodec;

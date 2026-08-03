@@ -1,8 +1,25 @@
-use std::marker::PhantomData;
+use std::{marker::PhantomData, ops::Add, time::SystemTime};
 
 use crate::{Bucket, CodecError, KeyCodec, ValueCodec};
 
-use super::CollectionIter;
+use super::{CollectionIter, CompareOutcome, Entry};
+
+/// Optional behavior attached to a typed write.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WriteOptions {
+    pub expires_at: Option<SystemTime>,
+}
+
+impl WriteOptions {
+    pub const fn expires_at(time: SystemTime) -> Self {
+        Self {
+            expires_at: Some(time),
+        }
+    }
+}
+
+/// Marker implemented only by codecs intended for numeric updates.
+pub trait NumericValueCodec<N>: ValueCodec<N> {}
 
 /// Read capability for a typed collection.
 ///
@@ -30,7 +47,7 @@ where
     pub fn get(&self, key: &K) -> Result<Option<V>, CodecError> {
         let key = self.codec.encode_key(key)?;
         self.raw
-            .get_kv(key)
+            .get_live(key)?
             .map(|pair| self.codec.decode_value(pair.value()))
             .transpose()
     }
@@ -53,6 +70,7 @@ where
     pub fn iter(&self) -> CollectionIter<'b, 'tx, K, V, C> {
         CollectionIter {
             cursor: self.raw.cursor(),
+            raw: self.raw.clone_handle(),
             codec: self.codec.clone(),
             remaining: None,
             prefix: None,
@@ -66,6 +84,7 @@ where
         cursor.seek(prefix);
         CollectionIter {
             cursor,
+            raw: self.raw.clone_handle(),
             codec: self.codec.clone(),
             remaining: None,
             prefix: Some(prefix.to_vec()),
@@ -88,6 +107,7 @@ where
         cursor.seek(&start);
         Ok(CollectionIter {
             cursor,
+            raw: self.raw.clone_handle(),
             codec: self.codec.clone(),
             remaining: None,
             prefix: None,
@@ -98,6 +118,10 @@ where
 
     pub fn first(&self) -> Result<Option<(K, V)>, CodecError> {
         self.iter().next().transpose()
+    }
+
+    pub fn last(&self) -> Result<Option<(K, V)>, CodecError> {
+        self.iter().last().transpose()
     }
 
     pub fn len(&self) -> usize {
@@ -135,12 +159,33 @@ where
     }
 
     pub fn insert(&self, key: &K, value: &V) -> Result<Option<V>, CodecError> {
+        self.insert_with_options(key, value, WriteOptions::default())
+    }
+
+    pub fn insert_with_options(
+        &self,
+        key: &K,
+        value: &V,
+        options: WriteOptions,
+    ) -> Result<Option<V>, CodecError> {
         let key = self.read.codec.encode_key(key)?;
         let value = self.read.codec.encode_value(value)?;
-        self.read
-            .raw
-            .put(key, value)?
-            .map(|pair| self.read.codec.decode_value(pair.value()))
+        let previous = if let Some(expires_at) = options.expires_at {
+            self.read
+                .raw
+                .put_with_ttl(key.clone(), value, expires_at)?
+                .previous
+        } else {
+            let previous = self
+                .read
+                .raw
+                .put(key.clone(), value)?
+                .map(|pair| pair.value().to_vec());
+            self.read.raw.clear_ttl(&key)?;
+            previous
+        };
+        previous
+            .map(|bytes| self.read.codec.decode_value(&bytes))
             .transpose()
     }
 
@@ -150,7 +195,8 @@ where
             return Ok(None);
         };
         let value = self.read.codec.decode_value(previous.value())?;
-        self.read.raw.delete(key)?;
+        self.read.raw.delete(&key)?;
+        self.read.raw.clear_ttl(&key)?;
         Ok(Some(value))
     }
 
@@ -182,5 +228,94 @@ where
             self.read.raw.delete(key)?;
         }
         Ok(keys.len())
+    }
+
+    pub fn entry(&self, key: K) -> Result<Entry<'_, 'b, 'tx, K, V, C>, CodecError> {
+        let current = self.get(&key)?;
+        Ok(Entry {
+            collection: self,
+            key,
+            current,
+        })
+    }
+
+    pub fn compare_exchange(
+        &self,
+        key: &K,
+        expected: Option<&V>,
+        value: &V,
+    ) -> Result<CompareOutcome<V>, CodecError> {
+        let key = self.read.codec.encode_key(key)?;
+        let expected = expected
+            .map(|value| self.read.codec.encode_value(value))
+            .transpose()?;
+        let value = self.read.codec.encode_value(value)?;
+        let result = self
+            .read
+            .raw
+            .compare_exchange(key, expected.as_deref(), value)?;
+        Ok(CompareOutcome {
+            applied: result.applied,
+            observed: result
+                .observed
+                .map(|bytes| self.read.codec.decode_value(&bytes))
+                .transpose()?,
+            current: result
+                .current
+                .map(|bytes| self.read.codec.decode_value(&bytes))
+                .transpose()?,
+        })
+    }
+
+    pub fn pop_first(&self) -> Result<Option<(K, V)>, CodecError> {
+        let Some((key, value)) = self.read.first()? else {
+            return Ok(None);
+        };
+        self.remove(&key)?;
+        Ok(Some((key, value)))
+    }
+
+    pub fn pop_last(&self) -> Result<Option<(K, V)>, CodecError> {
+        let Some((key, value)) = self.read.last()? else {
+            return Ok(None);
+        };
+        self.remove(&key)?;
+        Ok(Some((key, value)))
+    }
+
+    pub fn delete_range(&self, start: &K, end_exclusive: &K) -> Result<usize, CodecError> {
+        let keys = self
+            .read
+            .range(start, end_exclusive)?
+            .map(|entry| entry.map(|(key, _)| key))
+            .collect::<Result<Vec<_>, _>>()?;
+        for key in &keys {
+            self.remove(key)?;
+        }
+        Ok(keys.len())
+    }
+
+    pub fn delete_prefix(&self, prefix: &[u8]) -> Result<usize, CodecError> {
+        let keys = self
+            .read
+            .prefix(prefix)
+            .map(|entry| entry.map(|(key, _)| key))
+            .collect::<Result<Vec<_>, _>>()?;
+        for key in &keys {
+            self.remove(key)?;
+        }
+        Ok(keys.len())
+    }
+}
+
+impl<'b, 'tx, K, V, C> WriteCollection<'b, 'tx, K, V, C>
+where
+    C: KeyCodec<K> + ValueCodec<V> + NumericValueCodec<V> + Clone,
+    V: Copy + Default + Add<Output = V>,
+{
+    pub fn fetch_add(&self, key: &K, amount: V) -> Result<V, CodecError> {
+        let previous = self.get(key)?.unwrap_or_default();
+        self.insert(key, &(previous + amount))?;
+        Ok(previous)
     }
 }

@@ -1,18 +1,27 @@
+mod batch;
 mod collection;
 mod definition;
+mod entry;
 mod iter;
 
 use std::marker::PhantomData;
 
 use crate::{Bucket, CodecError, KeyCodec, Tx, ValueCodec};
 
-pub use collection::{ReadCollection, WriteCollection};
+pub use batch::Batch;
+pub use collection::{NumericValueCodec, ReadCollection, WriteCollection, WriteOptions};
 pub use definition::{CollectionDef, OpenPolicy};
+pub use entry::{CompareOutcome, Entry};
 pub use iter::CollectionIter;
 
 const SCHEMA_BUCKET: &str = "\0inspace.schema.v1";
 
 impl<'tx> Tx<'tx> {
+    /// Starts an encoded multi-collection batch in this write transaction.
+    pub fn batch(&self) -> Batch<'_, 'tx> {
+        Batch::new(self)
+    }
+
     /// Opens a reusable typed collection with read-only capabilities.
     pub fn collection<'b, K, V, C>(
         &'b self,

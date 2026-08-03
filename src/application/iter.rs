@@ -1,10 +1,11 @@
 use std::marker::PhantomData;
 
-use crate::{CodecError, Cursor, Data, KeyCodec, ValueCodec};
+use crate::{Bucket, CodecError, Cursor, Data, KeyCodec, ValueCodec};
 
 /// Lazy, allocation-bounded typed traversal of a collection.
 pub struct CollectionIter<'b, 'tx, K, V, C> {
     pub(crate) cursor: Cursor<'b, 'tx>,
+    pub(crate) raw: Bucket<'b, 'tx>,
     pub(crate) codec: C,
     pub(crate) remaining: Option<usize>,
     pub(crate) prefix: Option<Vec<u8>>,
@@ -36,13 +37,18 @@ where
             {
                 return None;
             }
+            let live = match self.raw.get_live(pair.key()) {
+                Ok(Some(live)) => live,
+                Ok(None) => continue,
+                Err(error) => return Some(Err(error.into())),
+            };
             if let Some(remaining) = &mut self.remaining {
                 *remaining -= 1;
             }
             return Some((|| {
                 Ok((
-                    self.codec.decode_key(pair.key())?,
-                    self.codec.decode_value(pair.value())?,
+                    self.codec.decode_key(live.key())?,
+                    self.codec.decode_value(live.value())?,
                 ))
             })());
         }

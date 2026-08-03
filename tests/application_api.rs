@@ -2,12 +2,22 @@
 
 use inspace::{
     CodecError, CollectionDef, DB, OpenPolicy, StringCodec, TransactionError, TypedCodec, U64Codec,
+    WriteOptions,
 };
+use std::{
+    collections::BTreeMap,
+    time::{Duration, SystemTime},
+};
+
+use rand::{Rng, SeedableRng, rngs::StdRng};
 
 mod common;
 
 const USERS: CollectionDef<u64, String, TypedCodec<U64Codec, StringCodec>> =
     CollectionDef::new("users", TypedCodec::new(U64Codec, StringCodec)).schema("example.users", 1);
+
+const COUNTERS: CollectionDef<u64, u64, TypedCodec<U64Codec, U64Codec>> =
+    CollectionDef::new("counters", TypedCodec::new(U64Codec, U64Codec));
 
 #[test]
 fn reusable_collection_supports_typed_crud_and_bounded_scans()
@@ -87,5 +97,97 @@ fn collection_schema_and_open_policy_are_enforced() -> Result<(), Box<dyn std::e
         exists,
         Err(TransactionError::Storage(inspace::Error::BucketExists))
     ));
+    Ok(())
+}
+
+#[test]
+fn entries_conflicts_numeric_updates_and_ttl_are_typed() -> Result<(), Box<dyn std::error::Error>> {
+    let file = common::RandomFile::new();
+    let db = DB::open(&file)?;
+
+    db.write(|tx| {
+        let users = tx.collection_mut(USERS)?;
+        assert_eq!(users.entry(1)?.or_insert("Ada".into())?, "Ada");
+        assert_eq!(
+            users
+                .entry(1)?
+                .and_modify(|name| name.push_str(" Lovelace"))?
+                .or_insert("ignored".into())?,
+            "Ada Lovelace"
+        );
+        let conflict = users.compare_exchange(&1, Some(&"wrong".into()), &"new".into())?;
+        assert!(!conflict.applied);
+        assert_eq!(conflict.current, Some("Ada Lovelace".into()));
+
+        let counters = tx.collection_mut(COUNTERS)?;
+        assert_eq!(counters.fetch_add(&7, 3)?, 0);
+        assert_eq!(counters.fetch_add(&7, 4)?, 3);
+
+        users.insert_with_options(
+            &9,
+            &"short lived".into(),
+            WriteOptions::expires_at(SystemTime::now() - Duration::from_secs(1)),
+        )?;
+        assert_eq!(users.get(&9)?, None);
+        Ok::<_, TransactionError<CodecError>>(())
+    })?;
+
+    db.write(|tx| {
+        let users = tx.collection_mut(USERS)?;
+        users.insert_many([(2, "B".into()), (3, "C".into()), (4, "D".into())])?;
+        assert_eq!(users.delete_range(&2, &4)?, 2);
+        assert_eq!(users.pop_last()?, Some((4, "D".into())));
+        assert_eq!(users.pop_first()?, Some((1, "Ada Lovelace".into())));
+        Ok::<_, TransactionError<CodecError>>(())
+    })?;
+    Ok(())
+}
+
+#[test]
+fn heterogeneous_batches_apply_inside_one_transaction() -> Result<(), Box<dyn std::error::Error>> {
+    let file = common::RandomFile::new();
+    let db = DB::open(&file)?;
+    db.write(|tx| {
+        let mut batch = tx.batch();
+        batch
+            .insert(USERS, &1, &"Ada".into())?
+            .insert(COUNTERS, &1, &41)?
+            .insert(COUNTERS, &2, &7)?
+            .remove(COUNTERS, &2)?;
+        assert_eq!(batch.apply()?, 4);
+        Ok::<_, TransactionError<CodecError>>(())
+    })?;
+    db.read(|tx| {
+        assert_eq!(tx.collection(USERS)?.get(&1)?, Some("Ada".into()));
+        assert_eq!(tx.collection(COUNTERS)?.get(&1)?, Some(41));
+        assert_eq!(tx.collection(COUNTERS)?.get(&2)?, None);
+        Ok::<_, TransactionError<CodecError>>(())
+    })?;
+    Ok(())
+}
+
+#[test]
+fn typed_collection_matches_btree_map_for_random_mutations()
+-> Result<(), Box<dyn std::error::Error>> {
+    let file = common::RandomFile::new();
+    let db = DB::open(&file)?;
+    let mut model = BTreeMap::<u64, u64>::new();
+    let mut random = StdRng::seed_from_u64(0x1a5_ace);
+
+    db.write(|tx| {
+        let collection = tx.collection_mut(COUNTERS)?;
+        for _ in 0..500 {
+            let key = random.gen_range(0..64);
+            if random.gen_bool(0.65) {
+                let value = random.r#gen();
+                assert_eq!(collection.insert(&key, &value)?, model.insert(key, value));
+            } else {
+                assert_eq!(collection.remove(&key)?, model.remove(&key));
+            }
+        }
+        let actual = collection.iter().collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(actual, model.into_iter().collect::<Vec<_>>());
+        Ok::<_, TransactionError<CodecError>>(())
+    })?;
     Ok(())
 }

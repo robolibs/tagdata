@@ -91,6 +91,17 @@ pub struct Bucket<'b, 'tx: 'b> {
 }
 
 impl<'b, 'tx> Bucket<'b, 'tx> {
+    pub(crate) fn clone_handle(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            freelist: self.freelist.clone(),
+            writable: self.writable,
+            path: self.path.clone(),
+            changes: self.changes.clone(),
+            _phantom: PhantomData,
+        }
+    }
+
     /// Adds to or replaces key / value data in the bucket.
     /// Returns an error if the key currently exists but is a bucket instead of a key / value pair.
     ///
