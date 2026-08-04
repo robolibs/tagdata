@@ -16,6 +16,10 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[[example]]
+name = "benchmark_typed_reads"
+required-features = ["typed"]
+
 [features]
 default = []
 test-hooks = []
