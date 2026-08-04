@@ -280,3 +280,47 @@ fn kv_iter() -> Result<(), Error> {
     };
     Ok(())
 }
+
+#[test]
+fn point_reads_and_cursors_agree_across_a_deep_tree() -> Result<(), Error> {
+    let file = common::RandomFile::new();
+    let db = OpenOptions::new().pagesize(1024).open(&file)?;
+    let items = 20_000_u64;
+    db.update(|tx| {
+        let bucket = tx.create_bucket("deep")?;
+        for key in 0..items {
+            let encoded = (key * 2).to_be_bytes();
+            bucket.put(encoded, encoded)?;
+        }
+        Ok(())
+    })?;
+
+    db.view(|tx| {
+        let bucket = tx.get_bucket("deep")?;
+        for key in 0..items {
+            let encoded = (key * 2).to_be_bytes();
+            assert_eq!(bucket.get_kv(encoded).unwrap().value(), encoded);
+        }
+        assert!(bucket.get_kv([]).is_none());
+        assert!(bucket.get_kv(17_u64.to_be_bytes()).is_none());
+        assert!(bucket.get_kv([u8::MAX; 9]).is_none());
+
+        let forward = bucket
+            .kv_pairs()
+            .map(|pair| u64::from_be_bytes(pair.key().try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(forward.len() as u64, items);
+        assert!(forward.windows(2).all(|pair| pair[0] < pair[1]));
+
+        let mut cursor = bucket.cursor();
+        assert!(cursor.seek((items * 2 / 3 * 2).to_be_bytes()));
+        assert!(cursor.current().is_some());
+        cursor.seek_last();
+        let mut reverse_count = 0_u64;
+        while cursor.previous().is_some() {
+            reverse_count += 1;
+        }
+        assert_eq!(reverse_count, items);
+        Ok(())
+    })
+}

@@ -240,6 +240,22 @@ pub(crate) fn search(
     }
 }
 
+pub(crate) fn search_leaf(key: &[u8], mut page_id: PageID, b: &InnerBucket) -> (bool, SearchPath) {
+    loop {
+        let page_node = b.page_node(PageNodeID::Page(page_id));
+        let id = page_node.id();
+        let (index, exact) = page_node.index(key);
+        if page_node.leaf() {
+            return (exact, SearchPath { index, id });
+        }
+        let next_page_id = page_node.index_page(index);
+        if next_page_id == 0 {
+            return (false, SearchPath { index, id });
+        }
+        page_id = next_page_id;
+    }
+}
+
 // Keeps track of the path we've taken to search a PageNode.
 pub(crate) struct SearchPath {
     pub(crate) index: usize,

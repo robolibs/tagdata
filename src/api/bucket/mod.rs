@@ -11,7 +11,7 @@ use crate::{
     BucketName,
     bytes::{Bytes, ToBytes},
     changes::{ChangeOperation, ChangeTracker},
-    cursor::{Cursor, Range, ToBuckets, ToKVPairs, search},
+    cursor::{Cursor, Range, ToBuckets, ToKVPairs, search, search_leaf},
     data::{Data, KVPair},
     errors::{Error, Result},
     freelist::TxFreelist,

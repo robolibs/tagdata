@@ -78,11 +78,10 @@ impl<'b> InnerBucket<'b> {
     }
 
     pub fn get<'a, T: AsRef<[u8]>>(&'a mut self, key: T) -> Option<Leaf<'b>> {
-        let (exists, stack) = search(key.as_ref(), self.meta.root_page, self);
-        let last = stack.last().unwrap();
+        let (exists, leaf) = search_leaf(key.as_ref(), self.meta.root_page, self);
         if exists {
-            let page_node = self.page_node(last.id);
-            page_node.val(last.index)
+            let page_node = self.page_node(leaf.id);
+            page_node.val(leaf.index)
         } else {
             None
         }
