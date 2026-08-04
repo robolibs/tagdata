@@ -13,6 +13,24 @@ pub struct TtlWriteResult {
 }
 
 impl<'b, 'tx> Bucket<'b, 'tx> {
+    pub(crate) fn expiration_bucket(&self) -> Result<Option<Bucket<'b, 'tx>>> {
+        match self.get_bucket(TTL_BUCKET) {
+            Ok(bucket) => Ok(Some(bucket)),
+            Err(Error::BucketMissing) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    #[cfg(feature = "typed")]
+    pub(crate) fn key_is_live(&self, key: &[u8]) -> Result<bool> {
+        match self.get_kv(key) {
+            Some(expiration) => {
+                Ok(decode_expiration(expiration.value())? > epoch_millis(SystemTime::now())?)
+            }
+            None => Ok(true),
+        }
+    }
+
     /// Writes a value and its persistent wall-clock expiration atomically.
     pub fn put_with_ttl<K, V>(
         &self,
@@ -128,13 +146,12 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
     }
 
     fn expiration(&self, key: &[u8]) -> Result<Option<u64>> {
-        match self.get_bucket(TTL_BUCKET) {
-            Ok(expirations) => expirations
+        match self.expiration_bucket()? {
+            Some(expirations) => expirations
                 .get_kv(key)
                 .map(|pair| decode_expiration(pair.value()))
                 .transpose(),
-            Err(Error::BucketMissing) => Ok(None),
-            Err(error) => Err(error),
+            None => Ok(None),
         }
     }
 

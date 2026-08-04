@@ -91,7 +91,7 @@ where
     pub fn iter(&self) -> CollectionIter<'b, 'tx, K, V, C> {
         CollectionIter {
             cursor: self.raw.cursor(),
-            raw: self.raw.clone_handle(),
+            expirations: self.raw.expiration_bucket(),
             codec: self.codec.clone(),
             remaining: None,
             prefix: None,
@@ -107,7 +107,7 @@ where
         cursor.seek_last();
         CollectionIter {
             cursor,
-            raw: self.raw.clone_handle(),
+            expirations: self.raw.expiration_bucket(),
             codec: self.codec.clone(),
             remaining: None,
             prefix: None,
@@ -123,7 +123,7 @@ where
         cursor.seek(prefix);
         CollectionIter {
             cursor,
-            raw: self.raw.clone_handle(),
+            expirations: self.raw.expiration_bucket(),
             codec: self.codec.clone(),
             remaining: None,
             prefix: Some(prefix.to_vec()),
@@ -240,7 +240,7 @@ where
         }
         Ok(CollectionIter {
             cursor,
-            raw: self.raw.clone_handle(),
+            expirations: self.raw.expiration_bucket(),
             codec: self.codec.clone(),
             remaining: None,
             prefix: None,
@@ -277,7 +277,7 @@ where
         }
         CollectionIter {
             cursor,
-            raw: self.raw.clone_handle(),
+            expirations: self.raw.expiration_bucket(),
             codec: self.codec.clone(),
             remaining: None,
             prefix: None,

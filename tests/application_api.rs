@@ -259,3 +259,41 @@ fn ordered_bulk_load_validates_monotonic_input() -> Result<(), Box<dyn std::erro
     })?;
     Ok(())
 }
+
+#[test]
+fn typed_scans_filter_ttl_without_refetching_visible_records()
+-> Result<(), Box<dyn std::error::Error>> {
+    let file = common::RandomFile::new();
+    let db = DB::open(&file)?;
+    let now = SystemTime::now();
+    db.write(|tx| {
+        let counters = tx.collection_mut(COUNTERS)?;
+        counters.insert(&1, &10)?;
+        counters.insert_with_options(
+            &2,
+            &20,
+            WriteOptions::expires_at(now - Duration::from_secs(1)),
+        )?;
+        counters.insert_with_options(
+            &3,
+            &30,
+            WriteOptions::expires_at(now + Duration::from_secs(60)),
+        )?;
+        Ok::<_, TransactionError<CodecError>>(())
+    })?;
+
+    db.read(|tx| {
+        let counters = tx.collection(COUNTERS)?;
+        assert_eq!(
+            counters.iter().collect::<Result<Vec<_>, _>>()?,
+            vec![(1, 10), (3, 30)]
+        );
+        assert_eq!(
+            counters.iter_rev().collect::<Result<Vec<_>, _>>()?,
+            vec![(3, 30), (1, 10)]
+        );
+        assert_eq!(tx.get_bucket("counters")?.kv_pairs().count(), 3);
+        Ok::<_, TransactionError<CodecError>>(())
+    })?;
+    Ok(())
+}
