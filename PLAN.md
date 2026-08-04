@@ -1,617 +1,193 @@
-# Inspace Development Plan
+# Inspace Read-Performance Merge Plan
 
 ## Goal
 
-Build Inspace into a durable, observable, multi-process, memory-mapped database
-without weakening its compact byte-oriented API or zero-copy read path.
+Keep only the two read optimizations with the clearest value and smallest
+correctness cost:
+
+1. allocation-free point reads;
+2. direct typed cursor scans.
+
+Do not merge the freelist-free read-transaction or shared reader-registration
+experiments. Preserve the current on-disk format, commit protocol, checksums,
+reader coordination, and write durability.
+
+## Current experiment
+
+The full experiment exists on `perf/read-path-speedups`.
+
+| Commit | Work | Decision |
+|---|---|---|
+| `2c9690b` | Expanded read benchmark matrix | KEEP |
+| `e1ba452` | Typed benchmark feature gate | KEEP |
+| `935b233` | Allocation-free point lookup | KEEP |
+| `d776eba` | Freelist-free read transactions | DROP |
+| `3d298fb` | Direct typed cursor decoding | KEEP |
+| `f1d8bf7` | Shared reader registrations | DROP |
+
+Because the commits are interleaved, create a clean branch from `main` and
+cherry-pick only the KEEP commits in the order shown. Do not rewrite or merge
+the full experiment branch.
+
+The local `.gitignore` change belongs to the user and must remain untouched.
 
 ## Constraints
 
-- Maintain one current on-disk format; reject any other format marker.
-- Keep safe durability as the default.
-- Support many readers and one writer, including across processes.
-- Never reclaim a page that is visible to an active snapshot.
-- Keep the synchronous engine runtime-independent.
-- Keep optional conveniences out of the storage core where possible.
+- Keep one current on-disk format.
+- Do not weaken dirty-page checksums or the two-barrier commit protocol.
+- Retain per-read-transaction freelist validation.
+- Retain one reader registration per transaction.
+- Preserve multi-process snapshot and reclamation behavior.
+- Preserve raw and typed API behavior except for the documented iterator detail.
 - Keep every source and test file below 800 lines.
-- Every phase must pass `make verify` before it is considered complete.
+- Use Makefile targets for building, testing, formatting, and benchmarking.
+- Keep `plans/` local and Git-ignored.
 
-## Execution order
+## Phase 1: Establish the benchmark baseline
 
-| Phase | Work | Status | Depends on |
-|---|---|---|---|
-| 0 | Crash-proof commits and failure injection | DONE | Current engine |
-| 1 | Statistics and diagnostics | DONE | Phase 0 |
-| 2 | Genuine read-only opening | DONE | Phase 0 |
-| 3 | Multi-process readers and one writer | DONE | Phases 1-2 |
-| 4 | Snapshot backup and offline compaction | DONE | Phase 3 |
-| 5 | Checksummed current format | DONE | Phase 0 |
-| 6 | Transaction ergonomics and atomic operations | DONE | Phase 0 |
-| 7 | Optional typed codec layer | DONE | Phase 6 |
-| 8 | Change tracking, TTL, and watches | DONE | Phases 3 and 6 |
+Retain the expanded comparison harness and typed-scan benchmark.
 
-Phases 5 and 6 may run after Phase 3 has a settled coordination design. Phase 8
-must remain deferred until commit change tracking and delivery semantics are
-specified.
+The comparison matrix must measure:
 
-## Phase 0: Crash-proof commits
+- hot point reads inside one reused transaction;
+- one lookup per transaction;
+- overlapping read snapshots;
+- ordered full scans;
+- reopen plus point reads;
+- 8, 128, and 4096-byte values;
+- batched writes as a regression signal.
 
-### Problem
+The typed benchmark must compare direct cursor decoding with the former path
+that fetched every cursor result through another B+tree lookup.
 
-The commit path writes data and freelist pages, writes the alternate metadata
-page, and then performs one final sync. A crash during that operation can leave
-durable metadata referring to incomplete data pages.
-
-### Work
-
-1. Define the durability contract in storage documentation.
-2. Split commit publication into ordered stages:
-   - write dirty data and freelist pages;
-   - flush and sync those pages;
-   - write the alternate metadata page;
-   - flush and sync the metadata publication.
-3. Keep the safe two-barrier protocol as the default.
-4. Add a `Durability` option only after benchmarks establish useful alternatives.
-5. Add internal failpoints at every commit stage.
-6. Add child-process tests that terminate a writer at each failpoint, reopen the
-   database, and verify that either the old or new transaction is completely
-   visible—never a mixture.
-7. Test file growth, freelist publication, large overflow pages, and nested
-   buckets under interrupted commits.
-
-### Completion criteria
-
-- Every commit stage has deterministic failure coverage.
-- Reopening after each injected failure passes the full database check.
-- The default mode uses a data barrier before metadata publication.
-- Durability behavior is documented without overstating weaker modes.
-- `make verify` passes.
-
-## Phase 1: Statistics and diagnostics
-
-### Public API
-
-Add a non-exhaustive `Stats` snapshot returned by `DB::stats()`.
-
-Initial fields:
-
-- file size in bytes;
-- page size and allocated page count;
-- free and pending page counts;
-- current transaction ID;
-- active reader count;
-- oldest reader transaction ID;
-- pages or bytes pinned by readers when calculable;
-- committed transaction count and bytes written since open.
-
-Do not include recursive key counts in the first version because calculating
-them requires walking the tree.
-
-### Completion criteria
-
-- Reading statistics cannot block for an unbounded duration.
-- Statistics are documented as point-in-time values.
-- Tests cover empty, populated, churned, and reader-pinned databases.
-- The benchmark example reports storage and transaction statistics.
-- `make verify` passes.
-
-## Phase 2: Genuine read-only opening
-
-### Public API
-
-Prefer an explicit capability over a boolean:
-
-```rust
-let db = OpenOptions::new().read_only().open("data.db")?;
-```
-
-### Work
-
-1. Open existing files without write permissions.
-2. Use a read-only memory map.
-3. Use shared locking appropriate to each supported platform.
-4. Reject writable transactions immediately with a dedicated error.
-5. Never create or resize a file in read-only mode.
-6. Support read-only filesystems and permission-restricted files.
-7. Add process-level tests proving that multiple read-only handles can coexist.
-
-Read-only opening is a safe milestone, not the final multi-process design. It
-may initially block writers if that is required for correctness.
-
-### Completion criteria
-
-- Multiple processes can open the same database read-only.
-- Writable transactions cannot be created from a read-only handle.
-- Opening succeeds when the file is not writable.
-- Behavior is tested on Linux, macOS, and Windows.
-- `make verify` passes.
-
-## Phase 3: Multi-process readers and one writer
-
-### Required semantics
-
-- Multiple reader processes may hold stable snapshots concurrently.
-- Only one write transaction may commit at a time across all processes.
-- A writer may publish a new snapshot while older readers continue using theirs.
-- Pages visible to any active reader must not be reused.
-- Processes must detect file growth and remap safely.
-- Crashed processes must not permanently block writes or page reclamation.
-
-### Design milestone
-
-Before implementation, write a short design decision covering:
-
-- the cross-process writer lock;
-- reader registration storage;
-- snapshot transaction IDs;
-- stale-reader detection and PID-reuse protection;
-- lock-file or reserved-page layout;
-- remapping and metadata-generation detection;
-- platform-specific advisory-lock behavior;
-- recovery when the coordination state is missing or damaged.
-
-A likely design uses a sidecar coordination file containing a writer lock and
-reader slots. Removing the lifetime-exclusive database lock without shared
-reader tracking is explicitly forbidden because it would permit unsafe page
-reuse.
-
-### Tests
-
-- Concurrent readers in separate processes.
-- Competing writers in separate processes.
-- Writer publication while an old reader remains active.
-- Reader and writer crashes while holding coordination state.
-- Stale reader cleanup.
-- Database growth and remapping in other processes.
-- Rapid open/close cycles and PID reuse simulation.
-- Cross-platform locking behavior in CI.
-
-### Completion criteria
-
-- The required semantics above are demonstrated by process-level tests.
-- No correctness guarantee depends only on process-local mutexes or reader lists.
-- Killing any participating process cannot corrupt the database.
-- `make verify` passes on the supported platform matrix.
-
-## Phase 4: Snapshot backup and offline compaction
-
-### Public API
-
-```rust
-db.backup_to("backup.db")?;
-db.backup_writer(writer)?;
-db.compact_to("compact.db")?;
-```
-
-### Backup requirements
-
-- Capture one stable transaction snapshot.
-- Never copy a changing file as an uncoordinated byte stream.
-- Sync the destination before reporting success.
-- Validate the resulting database before returning success.
-- Document writer blocking, temporary space, and snapshot lifetime.
-
-### Compaction requirements
-
-- Copy only live buckets and key/value pairs into a fresh database.
-- Preserve bucket nesting and sequence counters.
-- Permit a different page size when explicitly requested.
-- Validate the destination.
-- Keep atomic replacement separate and guarded because rename and durability
-  behavior vary by platform.
-
-### Completion criteria
-
-- Backups remain consistent during concurrent writes.
-- Compaction reduces a churned database to approximately its live-data size.
-- Interrupted backup or compaction never damages the source database.
-- `make verify` passes.
-
-## Phase 5: Checksummed current format
-
-### Work
-
-1. Define one explicit current format rather than interpreting unknown layouts.
-2. Add checksums for every persisted page or overflow block.
-3. Validate page ranges, sizes, counts, and overflow spans before unsafe access.
-4. Return structured corruption errors instead of panicking where possible.
-5. Expose a supported `DB::verify()` operation.
-6. Add an offline verification command or example.
-7. Reject non-current format markers instead of carrying unused compatibility code.
-8. Benchmark checksum algorithms and verification policies.
-
-### Completion criteria
-
-- Single-bit corruption in metadata, branches, leaves, freelists, keys, and
-  values is detected reliably.
-- Corrupt offsets cannot cause out-of-bounds mmap interpretation.
-- The current format and its rejection behavior are documented.
-- `make verify` passes.
-
-## Phase 6: Transaction ergonomics and atomic operations
-
-### Named transactions
-
-Add clear alternatives to `tx(bool)`:
-
-```rust
-db.read_tx()?;
-db.write_tx()?;
-db.try_write_tx()?;
-```
-
-Keep `tx(bool)` temporarily for compatibility and deprecate it only after the
-named API is stable.
-
-### Scoped helpers
-
-Consider synchronous closure helpers:
-
-- `DB::view` for read-only work;
-- `DB::update` for writable work that commits only when the closure returns
-  `Ok`;
-- automatic rollback on errors and panics through transaction drop.
-
-Do not allow a transaction to cross an asynchronous suspension point. An
-optional adapter may run one complete synchronous closure on a blocking worker,
-but the storage core must not depend on an async runtime.
-
-### Atomic bucket operations
-
-- `put_if_absent`;
-- `compare_exchange`;
-- `delete_if_value`.
-
-Specify missing-key behavior and return both the observed and updated values in
-a form that respects transaction lifetimes.
-
-### Completion criteria
-
-- Boolean transaction inversion is unnecessary in new code.
-- Nonblocking writer acquisition is available.
-- Atomic operations are serializable and covered for success and conflict cases.
-- Existing public behavior remains compatible.
-- `make verify` passes.
-
-## Phase 7: Optional typed codec layer
-
-Keep the raw byte API primary. Add optional abstractions:
-
-- `KeyCodec` with documented ordering preservation;
-- `ValueCodec`;
-- `TypedBucket<K, V, C>`;
-- structured encode/decode errors;
-- optional serialization adapters behind Cargo features.
-
-Typed range iteration must only be offered when the key encoding preserves the
-desired byte ordering. Owned decoding is acceptable; do not claim zero-copy for
-codecs that allocate.
-
-### Completion criteria
-
-- Raw buckets require no serialization dependencies.
-- Typed and raw access can coexist safely.
-- Schema and codec versioning are documented.
-- Ordering tests cover signed numbers, unsigned numbers, strings, and compound
-  keys for every provided key codec.
-- `make verify` passes with default and all features.
-
-## Phase 8: Change tracking, TTL, and watches
-
-### Change-set foundation
-
-First define a transaction change set containing ordered bucket paths, keys,
-operation types, and commit transaction IDs. Decide whether values are included
-and how memory use is bounded.
-
-### Watches
-
-Specify before implementation:
-
-- process-local versus cross-process delivery;
-- durable replay versus best-effort notification;
-- ordering and transaction boundaries;
-- slow-consumer backpressure;
-- overflow and disconnect behavior.
-
-### TTL
-
-Specify before implementation:
-
-- wall-clock behavior and clock jumps;
-- persistent expiry indexes;
-- lazy versus background cleanup;
-- snapshot visibility of expired entries;
-- interaction with backup and compaction.
-
-TTL and watches must not be implemented as unrelated hooks. Both should build on
-the same committed change-set and transaction-ID foundation.
-
-## Deferred ideas
-
-The following are intentionally not near-term priorities:
-
-- **Transparent compression:** it removes zero-copy access for compressed values
-  and should be opt-in at the bucket or codec layer.
-- **Encryption at rest:** mmap access, key management, page authentication, and
-  recovery require a separate threat model and format design.
-- **Native async transactions:** transactions hold synchronous locks and borrowed
-  mmap data; making them await-safe would encourage long-lived locks.
-- **Savepoints:** useful, but they require reversible allocation, freelist, and
-  tree mutation state and should follow the transaction change-set design.
-
-## Global verification gate
-
-Every phase must run:
+Run the baseline and candidate on the same host with:
 
 ```sh
+INSPACE_BENCH_ITEMS=100000 \
+INSPACE_BENCH_READS=500000 \
+INSPACE_BENCH_SHORT_READS=500 \
+INSPACE_BENCH_REOPEN_READS=10000 \
+INSPACE_BENCH_SAMPLES=9 \
+make benchmark-compare
+
+INSPACE_BENCH_ITEMS=100000 \
+INSPACE_BENCH_SAMPLES=9 \
+make benchmark-typed
+```
+
+## Phase 2: Allocation-free point reads
+
+### Implementation
+
+- Keep the full path-producing search for cursors and mutations.
+- Use a leaf-only traversal for ordinary `Bucket::get` and `get_kv` calls.
+- Do not allocate a `Vec` or populate mutation-only parent state during point
+  reads.
+- Let later write operations perform their own full traversal when required.
+
+### Required tests
+
+- Existing and missing keys below, between, and above stored keys.
+- A deep tree built with small pages.
+- Agreement between point reads, seeks, forward iteration, and reverse
+  iteration.
+- Writable transactions can still read and subsequently mutate the same tree.
+
+### Acceptance gate
+
+- Hot point-read throughput improves by at least 5% for all three value sizes.
+- No raw scan regression exceeds 3% across repeated medians.
+- Public APIs and returned bytes remain unchanged.
+
+Expected measured gain from the experiment: approximately 7-11% over the old
+Inspace implementation, leaving Inspace approximately 7-11% faster than jammdb
+for hot point reads in one reused transaction on the test host.
+
+## Phase 3: Direct typed cursor scans
+
+### Implementation
+
+- Resolve the reserved TTL lookup bucket once when constructing an iterator.
+- Decode the key and value already returned by the cursor.
+- Never fetch the main record again through `get_live`.
+- Continue checking the current wall clock for every TTL-bearing record.
+- Preserve prefix, range, reverse, pagination, and record-limit behavior.
+- Raw scans must continue exposing stored records regardless of TTL.
+
+### Documented iterator detail
+
+An iterator captures whether its TTL lookup bucket exists when the iterator is
+created. Creating the first TTL entry later in the same writable transaction is
+not reflected in that already-created iterator. Normal read transactions cannot
+change TTL state and are unaffected.
+
+### Required tests
+
+- No TTL metadata.
+- Mixed live and expired records.
+- Forward and reverse traversal.
+- Prefix, range, pagination, and bounded scans.
+- Raw visibility still includes expired stored records.
+- Corrupt TTL metadata produces a structured iterator error.
+
+### Acceptance gate
+
+- Typed full-scan throughput improves by at least 10x.
+- TTL visibility remains correct in ordinary read transactions.
+- No persisted TTL layout or public codec API changes.
+
+Expected measured gain from the experiment: approximately 19.2x for a typed
+full scan of 100,000 records.
+
+## Phase 4: Explicitly remove the rejected experiments
+
+### Restore read-transaction freelist validation
+
+- Read transactions clone the current freelist as before.
+- Read transactions validate the persisted freelist block as before.
+- `num_freelist_pages` remains initialized for every transaction.
+
+This intentionally gives up approximately 34% throughput for one-lookup read
+transactions. Those transactions remain much slower than jammdb either way, so
+the reduced corruption detection is not worth retaining.
+
+### Restore one registration per reader
+
+- Remove the process-local weak-registration map.
+- Every read transaction owns and removes its own locked reader file.
+- Keep stale-reader cleanup entirely kernel-lock based.
+
+This intentionally gives up the experimental gain for large groups of
+overlapping same-generation readers. The simpler coordination boundary is more
+valuable unless a real application demonstrates that workload.
+
+## Phase 5: Final validation
+
+Run:
+
+```sh
+make fmt
 make verify
-make run
+INSPACE_BENCH_ITEMS=100000 \
+INSPACE_BENCH_READS=500000 \
+INSPACE_BENCH_SHORT_READS=500 \
+INSPACE_BENCH_REOPEN_READS=10000 \
+INSPACE_BENCH_SAMPLES=9 \
+make benchmark-compare
+INSPACE_BENCH_ITEMS=100000 INSPACE_BENCH_SAMPLES=9 make benchmark-typed
 ```
 
-Additional project invariants:
+Confirm:
 
-```sh
-find src tests -type f -exec wc -l {} +
-git diff --check
-```
+- every source and test file is below 800 lines;
+- `git diff --check` is clean;
+- only the four KEEP commits or equivalent changes are present;
+- `.gitignore` remains the user's uncommitted change;
+- README benchmark claims match the measured workloads;
+- no storage-format, durability, checksum, or coordination guarantee changed.
 
-No source or test file may exceed 800 lines. New unsafe code requires a documented
-safety invariant and focused corruption/bounds tests.
+## Merge decision
 
----
-
-## Roadmap extension: application-facing API and operational maturity
-
-The storage engine is now feature-complete for the original phases. The next
-work should make Inspace pleasant and difficult to misuse when embedded across
-many different applications. The raw byte API remains supported and zero-copy;
-new typed and convenience APIs must be additive rather than hiding storage
-costs or transaction boundaries.
-
-| Phase | Work | Status | Depends on |
-|---|---|---|---|
-| 9 | Reusable application API | DONE | Phases 6-8 |
-| 10 | Portability, contention, and capacity controls | DONE | Phase 9 |
-| 11 | Operator CLI, diagnostics, and salvage | DONE | Phases 4-5 and 10 |
-| 12 | Scalable TTL and precise page reclamation | DONE | Phases 3 and 8 |
-| 13 | Optional durable change journal | DONE | Phases 8 and 12 |
-| 14 | Publication and compatibility contract | DONE | Phases 9-13 |
-
-## Phase 9: Reusable application API
-
-### Design principles
-
-1. Keep transactions explicit; convenience methods must not turn every operation
-   into an invisible transaction.
-2. Represent read and write capabilities with separate types so invalid writes
-   fail at compile time rather than at runtime.
-3. Use familiar ordered-map vocabulary: `get`, `contains_key`, `insert`,
-   `remove`, `entry`, `range`, `prefix`, `first`, and `last`.
-4. Keep raw values borrowed from the mmap. Typed codecs may return owned values,
-   but must not claim zero-copy behavior when decoding allocates.
-5. Make the common path short without removing access to buckets, nested paths,
-   cursors, atomic operations, TTL, watches, or raw bytes.
-6. Do not add a native async transaction. An application may run one complete
-   synchronous closure on its own blocking worker.
-
-### Named collection definitions
-
-Add reusable definitions that applications can declare once and use everywhere:
-
-```rust,ignore
-const USERS: CollectionDef<UserId, User, UserCodec> =
-    CollectionDef::new("users", UserCodec).schema(1);
-
-db.read(|tx| {
-    let users = tx.collection(USERS)?;
-    users.get(&user_id)
-})?;
-
-db.write(|tx| {
-    let mut users = tx.collection_mut(USERS)?;
-    users.insert(&user_id, &user)?;
-    Ok(())
-})?;
-```
-
-Requirements:
-
-- A definition contains a stable bucket path, key/value codecs, schema identity,
-  and open policy.
-- Definitions are cheap to copy and contain no transaction state.
-- `ReadCollection` exposes only reads; `WriteCollection` adds mutation methods.
-- Opening with an incompatible persisted schema or codec returns a structured
-  error before decoding user data.
-- Raw and typed collection handles can coexist in one transaction.
-- Nested paths use a reusable `BucketPath`/`CollectionPath` type instead of
-  repeatedly opening each path component by hand.
-
-### Map-like access
-
-Add these operations consistently to raw and typed collection handles:
-
-- `get`, `get_owned`, `contains_key`, and `multi_get`;
-- `insert`/`put`, returning the previous value;
-- `remove`/`delete`, returning `Ok(None)` for a missing key;
-- `first`, `last`, `pop_first`, and `pop_last`;
-- `len`, `is_empty`, and `clear` with documented traversal cost;
-- `delete_range` and `delete_prefix` with explicit write-transaction semantics;
-- `insert_many` and `remove_many`, with all changes committed atomically by the
-  enclosing transaction.
-
-Keep existing method names for compatibility. New aliases should converge on
-standard Rust collection terminology, and deprecation should wait until the new
-surface has been used by real applications.
-
-### Entry and update API
-
-Provide an `Entry` API for single-lookup manipulation:
-
-```rust,ignore
-users
-    .entry(user_id)?
-    .and_modify(|user| user.login_count += 1)?
-    .or_insert(default_user)?;
-```
-
-The entry surface should cover:
-
-- occupied and vacant matching;
-- `or_insert`, `or_insert_with`, `and_modify`, `replace`, and `remove`;
-- compare/exchange conflicts as expected outcomes, separate from storage errors;
-- numeric `fetch_add` helpers only for codecs that define an unambiguous numeric
-  representation;
-- TTL write options on the same mutation so value and expiration cannot drift.
-
-For typed values, `and_modify` decodes once and encodes once. For raw values,
-provide a closure over the current bytes without promising in-place mmap writes.
-
-### Transaction closures and application errors
-
-Generalize scoped helpers so application errors can abort without being forced
-into `inspace::Error`:
-
-```rust,ignore
-let result: Result<User, TransactionError<MyError>> = db.write(|tx| {
-    // Storage failures and domain failures remain distinguishable.
-});
-```
-
-Requirements:
-
-- distinguish storage/commit failures, expected conflicts, and application
-  errors with structured enums;
-- roll back on every closure error and panic;
-- preserve the current panic-safe mutex behavior;
-- add deadline-aware `write_tx_timeout(Duration)` and `write_timeout` helpers;
-- keep `try_write_tx()` for immediate nonblocking acquisition.
-
-### Streaming traversal
-
-Typed traversal must match the raw API's bounded-memory behavior:
-
-- lazy `iter`, `keys`, `values`, `range`, and `prefix` iterators;
-- forward and reverse traversal;
-- seek, inclusive/exclusive bounds, `take`, and resumable pagination tokens;
-- iterator items return `Result` so one decode failure identifies the failing key
-  without collecting the entire bucket;
-- existing collecting helpers remain as wrappers over streaming iterators.
-
-### Batches and multi-collection work
-
-Transactions already provide atomicity across buckets. Add a convenience batch
-surface without introducing a second transaction model:
-
-```rust,ignore
-db.write(|tx| {
-    tx.batch()
-        .insert(USERS, id, user)
-        .remove(SESSIONS, session_id)
-        .apply()?;
-    Ok(())
-})?;
-```
-
-Support ordered bulk loading as a separate optimized path. It must validate key
-ordering, preserve normal commit durability, and fall back to ordinary insertion
-when the preconditions are not met.
-
-### Filtered watches
-
-Build filters over the existing committed change-set foundation:
-
-- watch one collection or nested path;
-- optional key prefix/range and operation filters;
-- explicit `from_now` semantics for the current best-effort watch;
-- preserve transaction boundaries when only some changes match;
-- make disconnect/overflow observable through a dedicated watch error.
-
-Durable replay belongs to Phase 13 and must not be implied by this API.
-
-### API research basis
-
-The design should combine proven patterns rather than clone one database API:
-
-- [redb](https://docs.rs/redb/latest/redb/struct.Database.html)'s reusable typed
-  table definitions and transaction-scoped table handles;
-- [sled](https://docs.rs/sled/latest/sled/struct.Tree.html)'s `BTreeMap`-like
-  trees, batches, range/prefix scans, and explicit compare-and-swap outcomes;
-- [RocksDB](https://github.com/facebook/rocksdb/wiki/RocksDB-Overview)'s
-  consistent `MultiGet`, atomic `WriteBatch`, snapshots, and reversible iterators;
-- [heed](https://docs.rs/heed/latest/heed/)'s typed codecs and forward/reverse
-  range iterators over an mmap database.
-
-### Phase 9 completion criteria
-
-- A representative application can declare collections once and perform common
-  CRUD without repeating bucket names or codec plumbing.
-- Read handles cannot call mutation methods at compile time.
-- Domain errors can abort scoped writes without losing their original type.
-- Typed scans are lazy and bounded-memory.
-- Entry, batch, range, prefix, reverse, TTL, and filtered-watch behavior have
-  integration tests for raw and typed collections.
-- Property tests compare randomized operations with `BTreeMap` behavior.
-- Compile-fail tests cover capability and lifetime misuse.
-- Existing raw API tests continue to pass unchanged.
-- `make verify` and `make run` pass.
-
-## Phase 10: Portability, contention, and capacity controls
-
-- Auto-detect persisted page size and format version when opening an existing
-  database; retain an explicit forensic override and fail closed on ambiguity.
-- Expose read-only `FormatInfo` inspection without mapping the full database.
-- Add writer acquisition deadlines and a structured timeout/contention error.
-- Add `max_file_bytes` and configurable growth increments. Reject a commit before
-  publication when its required extent exceeds policy.
-- Test corrupted bootstrap metadata, cross-system page sizes, lock timeouts, and
-  capacity rejection during file growth.
-
-## Phase 11: Operator CLI, diagnostics, and salvage
-
-- Ship a separate lightweight operator binary with `info`, `stats`, `verify`,
-  `backup`, and `compact` commands plus stable JSON output.
-- Replace `verify() -> Result<()>` internally with structured corruption reports
-  containing page ID, offset, page kind, failed invariant, and bucket path when
-  recoverable.
-- Add conservative copy-out salvage into a new destination with a manifest of
-  skipped records/pages. Never perform automatic in-place repair.
-- Separate fast physical snapshot backup from logical compaction.
-- Package the operator CLI in releases instead of the demonstration example.
-
-## Phase 12: Scalable TTL and precise page reclamation
-
-- Replace key-ordered TTL cleanup with a deadline-ordered index so
-  cleanup stops at the first unexpired record.
-- Add database-level bounded expiry cleanup across nested collections.
-- Persist freelist retirement generations in the current format and reclaim
-  only pages older than the oldest registered reader.
-- Fail conservatively when coordination state is damaged.
-- Benchmark long-lived readers, write churn, TTL-heavy workloads, file growth,
-  and cleanup latency.
-
-## Phase 13: Optional durable change journal
-
-- Keep the default process-local watch lightweight and best-effort.
-- Add an opt-in journal that records complete transaction boundaries atomically
-  with the user transaction and replays from a transaction ID.
-- Specify retention, acknowledgements/checkpoints, filtering, truncation, gap
-  detection, and whether values may ever be included.
-- Support cross-process consumers without making commit latency unbounded.
-- Use the journal as the foundation for optional incremental backup, secondary
-  indexing, and replication adapters.
-
-## Phase 14: Publication and compatibility contract
-
-- Define MSRV, SemVer policy, supported platforms, and the single-format policy.
-- Add one frozen database fixture for the current format.
-- Test open/read/write/verify against the frozen fixture in CI.
-- Complete crate metadata and add `cargo package --locked` plus MSRV CI.
-- Publish only after the Phase 9 API has been exercised by multiple real
-  applications; prefer prereleases until that surface settles.
-
-## Still deferred
-
-Transparent compression, encryption at rest, native async transactions, and
-savepoints remain deferred. They should not delay the reusable application API,
-operational tooling, or storage-scale work above.
+Merge only when the point-read and typed-scan acceptance gates pass on the same
+host and the full verification lane is green. Otherwise discard the curated
+branch and retain `perf/read-path-speedups` only as an experimental record.
