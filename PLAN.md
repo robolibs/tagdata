@@ -1,5 +1,12 @@
 # Inspace Read-Performance Merge Plan
 
+## Status
+
+IMPLEMENTED on `perf/read-path-curated`. The curated branch was created from
+`main`, contains only the approved benchmark, point-read, and typed-scan work,
+and passes `make verify`. The rejected transaction and registration changes are
+absent.
+
 ## Goal
 
 Keep only the two read optimizations with the clearest value and smallest
@@ -99,9 +106,9 @@ make benchmark-typed
 - No raw scan regression exceeds 3% across repeated medians.
 - Public APIs and returned bytes remain unchanged.
 
-Expected measured gain from the experiment: approximately 7-11% over the old
-Inspace implementation, leaving Inspace approximately 7-11% faster than jammdb
-for hot point reads in one reused transaction on the test host.
+The final curated benchmark improved point-read throughput by approximately
+17-27% over the recorded baseline. In the same run, Inspace was approximately
+17-26% faster than jammdb for hot point reads in one reused transaction.
 
 ## Phase 3: Direct typed cursor scans
 
@@ -136,8 +143,8 @@ change TTL state and are unaffected.
 - TTL visibility remains correct in ordinary read transactions.
 - No persisted TTL layout or public codec API changes.
 
-Expected measured gain from the experiment: approximately 19.2x for a typed
-full scan of 100,000 records.
+The final curated benchmark processed 100,000 typed records approximately 17.5x
+faster than the former repeated-lookup path.
 
 ## Phase 4: Explicitly remove the rejected experiments
 
@@ -191,3 +198,13 @@ Confirm:
 Merge only when the point-read and typed-scan acceptance gates pass on the same
 host and the full verification lane is green. Otherwise discard the curated
 branch and retain `perf/read-path-speedups` only as an experimental record.
+
+## Completion evidence
+
+- `make verify`: PASS
+- Hot point reads versus jammdb: 1.19x for 8-byte values, 1.26x for 128-byte
+  values, and 1.17x for 4096-byte values
+- Typed full scan: 17.5x faster than the former repeated-lookup path
+- `src/api/tx.rs`: identical to `main`
+- `src/storage/coordination.rs`: identical to `main`
+- Every source and test file remains below 800 lines
