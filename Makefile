@@ -17,7 +17,7 @@ $(info ------------------------------------------)
 $(info Project: $(PROJECT_NAME) v$(PROJECT_VERSION))
 $(info ------------------------------------------)
 
-.PHONY: build b compile c run r benchmark fixtures operator package test t check check-all test-all clippy rustdoc fmt fmt-check clean verify release help h
+.PHONY: build b compile c run r benchmark benchmark-compare fixtures operator package test t check check-all test-all clippy rustdoc fmt fmt-check clean verify release help h
 
 build:
 	@$(CARGO) build --lib
@@ -37,6 +37,9 @@ r: run
 
 benchmark:
 	@$(CARGO) run --release --example benchmark
+
+benchmark-compare:
+	@$(CARGO) run --release --example benchmark_jammdb
 
 fixtures:
 	@$(CARGO) run --example fixture_gen
@@ -98,6 +101,7 @@ help:
 	@echo "  compile      Clean and rebuild"
 	@echo "  run          Run a development example"
 	@echo "  benchmark    Run the release-mode smoke benchmark"
+	@echo "  benchmark-compare  Compare Inspace with jammdb 0.11.0"
 	@echo "  fixtures     Regenerate the frozen current-format fixture"
 	@echo "  operator     Build the release-mode operator CLI"
 	@echo "  package      Verify and package the locked crate"
