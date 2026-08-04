@@ -30,6 +30,18 @@ use crate::{
 pub(crate) const MAGIC_VALUE: u32 = 0x00AB_CDEF;
 pub const FORMAT_VERSION: u32 = 3;
 
+/// Controls verification performed while publishing a write transaction.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WriteVerification {
+    /// Use checksummed copy-on-write pages and ordered durability barriers.
+    Standard,
+    /// Read back and compare every dirty block before publishing its metadata.
+    #[default]
+    ReadBack,
+    /// Perform readback verification and a complete structural database check.
+    Full,
+}
+
 // Minimum number of bytes to allocate when growing the databse
 pub(crate) const MIN_ALLOC_SIZE: u64 = 8 * 1024 * 1024;
 
@@ -119,12 +131,23 @@ impl OpenOptions {
         self
     }
 
-    /// Enables or disables "Strict Mode", where each transaction will check the database for errors before finalizing a write.
+    /// Compatibility shorthand for selecting full or readback verification.
     ///
-    /// The default is `false`, but you may enable this if you want an extra degree of safety for your data at the cost of
-    /// slower writes.
+    /// `true` selects [`WriteVerification::Full`]; `false` selects the default
+    /// [`WriteVerification::ReadBack`]. Use [`Self::write_verification`] to
+    /// explicitly select [`WriteVerification::Standard`].
     pub fn strict_mode(mut self, strict_mode: bool) -> Self {
-        self.flags.strict_mode = strict_mode;
+        self.flags.write_verification = if strict_mode {
+            WriteVerification::Full
+        } else {
+            WriteVerification::ReadBack
+        };
+        self
+    }
+
+    /// Selects the verification policy used for write transactions.
+    pub fn write_verification(mut self, verification: WriteVerification) -> Self {
+        self.flags.write_verification = verification;
         self
     }
 
@@ -254,7 +277,7 @@ impl Default for OpenOptions {
             max_file_bytes: None,
             growth_increment: MIN_ALLOC_SIZE,
             flags: DBFlags {
-                strict_mode: false,
+                write_verification: WriteVerification::default(),
                 mmap_populate: false,
                 direct_writes: false,
                 read_only: false,
@@ -266,7 +289,7 @@ impl Default for OpenOptions {
 
 #[derive(Clone, Copy)]
 pub(crate) struct DBFlags {
-    pub(crate) strict_mode: bool,
+    pub(crate) write_verification: WriteVerification,
     pub(crate) mmap_populate: bool,
     pub(crate) direct_writes: bool,
     pub(crate) read_only: bool,
@@ -430,6 +453,7 @@ pub(crate) struct DBInner {
     pub(crate) data: Mutex<Arc<Mmap>>,
     pub(crate) freelist: Mutex<Freelist>,
     pub(crate) file: Mutex<File>,
+    pub(crate) readback_file: Option<Mutex<File>>,
     pub(crate) open_ro_txs: Mutex<Vec<u64>>,
     pub(crate) coordination: Option<Coordination>,
     pub(crate) flags: DBFlags,
@@ -460,6 +484,12 @@ impl DBInner {
         } else {
             Some(Coordination::open(path)?)
         };
+        let readback_file =
+            if flags.read_only || flags.write_verification == WriteVerification::Standard {
+                None
+            } else {
+                Some(Mutex::new(FileOpenOptions::new().read(true).open(path)?))
+            };
         let mmap = mmap(&file, flags.mmap_populate)?;
         let mmap = Mutex::new(Arc::new(mmap));
         let db = DBInner {
@@ -467,6 +497,7 @@ impl DBInner {
             freelist: Mutex::new(Freelist::new()),
 
             file: Mutex::new(file),
+            readback_file,
             open_ro_txs: Mutex::new(Vec::new()),
             coordination,
 

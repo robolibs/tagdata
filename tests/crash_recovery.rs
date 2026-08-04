@@ -6,11 +6,13 @@ use inspace::{DB, Error};
 
 mod common;
 
-const STAGES: [(&str, Expected); 4] = [
+const STAGES: [(&str, Expected); 6] = [
     ("after-data-write", Expected::Old),
     ("after-data-sync", Expected::Old),
+    ("after-data-readback", Expected::Old),
     ("after-meta-write", Expected::Either),
     ("after-meta-sync", Expected::New),
+    ("after-meta-readback", Expected::New),
 ];
 
 #[derive(Clone, Copy)]
@@ -77,6 +79,46 @@ fn crash_commit_child() -> Result<(), Error> {
     bucket.put("overflow", vec![7; 256 * 1024])?;
     bucket.get_bucket("nested")?.put("value", "new")?;
     tx.commit()
+}
+
+#[test]
+fn readback_rejects_corrupted_writes_before_publication() -> Result<(), Error> {
+    for stage in ["data-readback", "meta-readback"] {
+        let file = common::RandomFile::new();
+        initialize(&file)?;
+
+        let status = Command::new(std::env::current_exe()?)
+            .arg("--exact")
+            .arg("corrupt_commit_child")
+            .arg("--nocapture")
+            .env("INSPACE_CORRUPT_DB", &file.path)
+            .env("INSPACE_CORRUPT_STAGE", stage)
+            .status()?;
+        assert!(status.success(), "corruption child failed at {stage}");
+
+        let db = DB::open(&file)?;
+        let tx = db.tx(false)?;
+        let bucket = tx.get_bucket("state")?;
+        assert_eq!(bucket.get_kv("value").unwrap().value(), b"old");
+        drop(bucket);
+        drop(tx);
+        db.check()?;
+    }
+    Ok(())
+}
+
+#[test]
+fn corrupt_commit_child() -> Result<(), Error> {
+    let Ok(path) = std::env::var("INSPACE_CORRUPT_DB") else {
+        return Ok(());
+    };
+
+    let db = DB::open(path)?;
+    let tx = db.tx(true)?;
+    tx.get_bucket("state")?.put("value", "new")?;
+    let error = tx.commit().expect_err("corrupted commit was accepted");
+    assert!(error.to_string().contains("readback verification"));
+    Ok(())
 }
 
 fn initialize(file: &common::RandomFile) -> Result<(), Error> {

@@ -208,3 +208,29 @@ branch and retain `perf/read-path-speedups` only as an experimental record.
 - `src/api/tx.rs`: identical to `main`
 - `src/storage/coordination.rs`: identical to `main`
 - Every source and test file remains below 800 lines
+
+## Write-corruption protection follow-up
+
+Status: IMPLEMENTED.
+
+Add three explicit commit policies without changing the format or read path:
+
+- `Standard`: checksummed copy-on-write blocks and the existing two barriers;
+- `ReadBack` (default): Standard plus dirty-block comparison before metadata
+  publication and metadata comparison after publication;
+- `Full`: ReadBack plus a full structural walk before metadata publication.
+
+Required gates are injected data and metadata corruption tests, crash tests at
+both new readback boundaries, a policy-specific write benchmark, `make verify`,
+and the existing 800-line file limit. Readback must use a separate buffered file
+descriptor so it remains compatible with direct-write configurations.
+
+Completion evidence on the development host (10,000 records, five medians):
+
+- ReadBack added 8% to a one-record commit, 5% to a 100-record commit, and 8%
+  to a 10,000-record commit versus Standard.
+- Full cost 53.26x, 26.18x, and 1.58x Standard for those same workloads because
+  its structural walk scales with the whole database rather than dirty data.
+- Injected dirty-page and metadata corruption was rejected before publication.
+- All six crash boundaries recovered a complete old or new snapshot.
+- `make verify` passed and the largest Rust file remained 766 lines.

@@ -2,7 +2,7 @@ use std::{
     cell::RefCell,
     collections::HashSet,
     fs::File,
-    io::{Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom, Write},
     marker::PhantomData,
     rc::Rc,
     sync::MutexGuard,
@@ -17,7 +17,7 @@ use crate::{
     changes::{ChangeOperation, ChangeTracker},
     coordination::{GateGuard, ReaderRegistration},
     cursor::ToBuckets,
-    db::{DB, FORMAT_VERSION},
+    db::{DB, DBInner, FORMAT_VERSION, WriteVerification},
     errors::{Error, Result},
     freelist::TxFreelist,
     meta::Meta,
@@ -488,7 +488,7 @@ impl<'tx> TxInner<'tx> {
                 for (page_id, (ptr, size)) in freelist.pages.iter() {
                     let buf = unsafe { std::slice::from_raw_parts_mut(ptr.as_ptr(), *size) };
                     seal_block(buf)?;
-                    file.seek(SeekFrom::Start(self.db.inner.pagesize * page_id))?;
+                    file.seek(SeekFrom::Start(block_offset(&self.db.inner, *page_id)?))?;
                     file.write_all(buf)?;
                 }
             }
@@ -497,14 +497,25 @@ impl<'tx> TxInner<'tx> {
             file.flush()?;
             file.sync_all()?;
             failpoints::hit("after-data-sync");
+            if self.db.inner.flags.write_verification != WriteVerification::Standard {
+                if let Some(page_id) = freelist.pages.keys().next() {
+                    failpoints::corrupt_file(
+                        "data-readback",
+                        file,
+                        block_offset(&self.db.inner, *page_id)?,
+                    )?;
+                }
+                verify_dirty_readback(&self.db.inner, freelist)?;
+                failpoints::hit("after-data-readback");
+            }
         }
-        if self.db.inner.flags.strict_mode {
+        if self.db.inner.flags.write_verification == WriteVerification::Full {
             self.check()?;
         }
         if let TxLock::Rw(lock) = &mut self.lock {
             let file = &mut *lock.file;
             // write meta page to file
-            {
+            let (meta_page_id, meta_buf) = {
                 let mut buf = vec![0; self.db.inner.pagesize as usize];
 
                 #[allow(clippy::cast_ptr_alignment)]
@@ -524,14 +535,21 @@ impl<'tx> TxInner<'tx> {
                 m.hash = m.hash_self();
                 seal_block(&mut buf)?;
 
-                file.seek(SeekFrom::Start(self.db.inner.pagesize * meta_page_id))?;
+                file.seek(SeekFrom::Start(block_offset(&self.db.inner, meta_page_id)?))?;
                 file.write_all(buf.as_slice())?;
-            }
+                (meta_page_id, buf)
+            };
 
             failpoints::hit("after-meta-write");
             file.flush()?;
             file.sync_all()?;
             failpoints::hit("after-meta-sync");
+            if self.db.inner.flags.write_verification != WriteVerification::Standard {
+                let offset = block_offset(&self.db.inner, meta_page_id)?;
+                failpoints::corrupt_file("meta-readback", file, offset)?;
+                verify_readback(&self.db.inner, offset, "metadata", &meta_buf)?;
+                failpoints::hit("after-meta-readback");
+            }
 
             let mut lock = self.db.inner.freelist.lock()?;
             *lock = freelist.inner.clone();
@@ -684,6 +702,50 @@ impl<'tx> TxInner<'tx> {
         }
         Ok(())
     }
+}
+
+fn verify_dirty_readback(db: &DBInner, freelist: &TxFreelist) -> Result<()> {
+    let readback_file = db
+        .readback_file
+        .as_ref()
+        .ok_or_else(|| Error::InvalidDB("write readback file is unavailable".into()))?;
+    let mut file = readback_file.lock()?;
+    let mut actual = Vec::new();
+    for (page_id, (ptr, size)) in &freelist.pages {
+        let expected = unsafe { std::slice::from_raw_parts(ptr.as_ptr(), *size) };
+        actual.resize(*size, 0);
+        file.seek(SeekFrom::Start(block_offset(db, *page_id)?))?;
+        file.read_exact(&mut actual)?;
+        if actual != expected {
+            return Err(Error::InvalidDB(format!(
+                "page {page_id} failed write readback verification"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn block_offset(db: &DBInner, page_id: u64) -> Result<u64> {
+    db.pagesize
+        .checked_mul(page_id)
+        .ok_or_else(|| Error::InvalidDB("page offset overflow".into()))
+}
+
+fn verify_readback(db: &DBInner, offset: u64, label: &str, expected: &[u8]) -> Result<()> {
+    let readback_file = db
+        .readback_file
+        .as_ref()
+        .ok_or_else(|| Error::InvalidDB("write readback file is unavailable".into()))?;
+    let mut file = readback_file.lock()?;
+    file.seek(SeekFrom::Start(offset))?;
+    let mut actual = vec![0; expected.len()];
+    file.read_exact(&mut actual)?;
+    if actual != expected {
+        return Err(Error::InvalidDB(format!(
+            "{label} failed write readback verification"
+        )));
+    }
+    Ok(())
 }
 
 impl<'tx> Drop for TxInner<'tx> {

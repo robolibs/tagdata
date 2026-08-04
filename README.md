@@ -15,8 +15,8 @@ See [acknowledgments](ACKOLEGMENT.md) for prior work that informed the project.
 - **Nested buckets:** byte-key/byte-value namespaces can form arbitrary trees.
 - **Ordered traversal:** cursors, key/value iterators, bucket iterators, and ranges.
 - **Space reuse:** freed pages are tracked and reused by later transactions.
-- **Configurable opening:** page size, initial allocation, mmap population, strict
-  checks, and direct writes are available through `OpenOptions`.
+- **Configurable opening:** page size, initial allocation, mmap population, write
+  verification, and direct writes are available through `OpenOptions`.
 - **Read-only handles:** existing databases can be opened from read-only files
   and shared safely by multiple reader processes.
 - **Runtime statistics:** file, page, freelist, transaction, and reader state is
@@ -144,6 +144,26 @@ before the alternate meta page is published, then the meta page is synced before
 the commit returns. After an interrupted commit, reopening selects either the
 complete previous snapshot or the complete newly published snapshot.
 
+The default `WriteVerification::ReadBack` policy rereads every dirty block from
+a separate buffered file descriptor after the data barrier and compares it with
+the bytes submitted to the kernel. Only a successful comparison permits the
+new metadata snapshot to be published; that metadata is also reread after its
+barrier. `WriteVerification::Standard` keeps checksums, copy-on-write, and both
+barriers without readback. `WriteVerification::Full` adds a complete structural
+walk before metadata publication. For example:
+
+```rust
+use inspace::{OpenOptions, WriteVerification};
+
+let db = OpenOptions::new()
+    .write_verification(WriteVerification::Full)
+    .open("important.db")?;
+# Ok::<(), inspace::Error>(())
+```
+
+Readback verifies the bytes visible through the operating system after sync; it
+does not replace drive power-loss protection or end-to-end storage hardware.
+
 Use `OpenOptions::new().read_only()` for a handle that never creates, resizes, or
 writes the database. A read-only handle rejects writable transactions.
 
@@ -188,6 +208,10 @@ order and reports medians across independent database files. The workload is
 controlled by `INSPACE_BENCH_ITEMS`, `INSPACE_BENCH_READS`,
 `INSPACE_BENCH_SHORT_READS`, `INSPACE_BENCH_REOPEN_READS`,
 `INSPACE_BENCH_SAMPLES`, and comma-separated `INSPACE_BENCH_VALUE_BYTES`.
+
+`make benchmark-write-verification` reports median commit latency for Standard,
+ReadBack, and Full policies. `INSPACE_BENCH_ITEMS` controls database size and
+`INSPACE_BENCH_SAMPLES` controls repetitions.
 Results are machine-specific and meaningful only when compared on the same
 host. Hot reads isolate lookup traversal, short transactions include snapshot
 coordination, and reopen reads include mapping and format inspection.
