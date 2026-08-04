@@ -181,10 +181,19 @@ SHA3-256 checksum with FNV-1a-64 over the same file. SHA3-256 is used on disk fo
 substantially stronger corruption detection; the benchmark keeps that cost
 visible rather than silently choosing the faster non-cryptographic hash.
 
-`make benchmark-compare` runs the same batched writes and hot point reads against
-Inspace and jammdb 0.11.0 in release mode. It alternates execution order and
-reports medians across independent database files. `INSPACE_BENCH_ITEMS`,
-`INSPACE_BENCH_READS`, and `INSPACE_BENCH_SAMPLES` control the workload.
+`make benchmark-compare` compares Inspace with jammdb 0.11.0 using hot point
+reads, one-lookup transactions, overlapping snapshots, ordered scans, reopen
+reads, three value sizes, and the same batched writes. It alternates execution
+order and reports medians across independent database files. The workload is
+controlled by `INSPACE_BENCH_ITEMS`, `INSPACE_BENCH_READS`,
+`INSPACE_BENCH_SHORT_READS`, `INSPACE_BENCH_REOPEN_READS`,
+`INSPACE_BENCH_SAMPLES`, and comma-separated `INSPACE_BENCH_VALUE_BYTES`.
+Results are machine-specific and meaningful only when compared on the same
+host. Hot reads isolate lookup traversal, short transactions include snapshot
+coordination, and reopen reads include mapping and format inspection.
+
+`make benchmark-typed` compares direct cursor decoding with the former typed
+scan path that repeated the main-tree lookup for every record.
 
 ## Commands
 
@@ -194,5 +203,6 @@ make run
 make test
 make benchmark
 make benchmark-compare
+make benchmark-typed
 make verify
 ```
