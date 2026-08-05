@@ -48,19 +48,24 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
         let expires_at_millis = epoch_millis(expires_at)?;
         let key = key.to_bytes();
         let previous = self.put(&key, value)?.map(|pair| pair.value().to_vec());
-        let expirations = self.get_or_create_bucket(TTL_BUCKET)?;
-        if let Some(previous_deadline) = expirations.get_kv(&key) {
-            let previous_deadline = decode_expiration(previous_deadline.value())?;
-            remove_deadline(self, previous_deadline, key.as_ref())?;
-        }
-        let deadline_key = deadline_key(expires_at_millis, key.as_ref());
-        expirations.put(key, expires_at_millis.to_be_bytes())?;
-        self.get_or_create_bucket(TTL_DEADLINES_BUCKET)?
-            .put(deadline_key, [])?;
+        self.set_expiration_millis(key.as_ref(), expires_at_millis)?;
         Ok(TtlWriteResult {
             previous,
             expires_at_millis,
         })
+    }
+
+    pub(crate) fn set_expiration_millis(&self, key: &[u8], expires_at_millis: u64) -> Result<()> {
+        let expirations = self.get_or_create_bucket(TTL_BUCKET)?;
+        if let Some(previous_deadline) = expirations.get_kv(key) {
+            let previous_deadline = decode_expiration(previous_deadline.value())?;
+            remove_deadline(self, previous_deadline, key)?;
+        }
+        let deadline_key = deadline_key(expires_at_millis, key);
+        expirations.put(key.to_vec(), expires_at_millis.to_be_bytes())?;
+        self.get_or_create_bucket(TTL_DEADLINES_BUCKET)?
+            .put(deadline_key, [])?;
+        Ok(())
     }
 
     /// Reads a value only when it has not expired at the current wall clock.
@@ -148,7 +153,7 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
         Ok(expired.len())
     }
 
-    fn expiration(&self, key: &[u8]) -> Result<Option<u64>> {
+    pub(crate) fn expiration(&self, key: &[u8]) -> Result<Option<u64>> {
         match self.expiration_bucket()? {
             Some(expirations) => expirations
                 .get_kv(key)
@@ -259,7 +264,7 @@ fn epoch_millis(time: SystemTime) -> Result<u64> {
     u64::try_from(millis).map_err(|error| invalid_time(error.to_string()))
 }
 
-fn decode_expiration(bytes: &[u8]) -> Result<u64> {
+pub(crate) fn decode_expiration(bytes: &[u8]) -> Result<u64> {
     let bytes: [u8; 8] = bytes
         .try_into()
         .map_err(|_| Error::InvalidDB("TTL expiration must contain eight bytes".into()))?;

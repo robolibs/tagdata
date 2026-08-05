@@ -189,7 +189,7 @@ impl Freelist {
 
     pub(crate) fn pages(&self) -> Vec<PageID> {
         let mut page_ids: Vec<PageID> = self.free_pages.iter().cloned().collect();
-        for (_, pages) in self.pending_pages.iter() {
+        for pages in self.pending_pages.values() {
             let mut pages = pages.to_vec();
             page_ids.append(&mut pages);
         }

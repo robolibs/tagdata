@@ -15,6 +15,13 @@ pub(crate) struct InnerBucket<'b> {
 }
 
 impl<'b> InnerBucket<'b> {
+    pub(crate) fn merge_next_int(&mut self, next_int: u64) {
+        if self.meta.next_int < next_int {
+            self.meta.next_int = next_int;
+            self.dirty = true;
+        }
+    }
+
     pub(crate) fn from_meta(meta: BucketMeta, pages: Pages) -> InnerBucket<'b> {
         debug_assert!(
             meta.root_page > 1,
@@ -337,7 +344,7 @@ impl<'b> InnerBucket<'b> {
         // If it isn't marked as dirty, make sure by checking
         // the sub-buckets to see if they're dirty.
         if !self.dirty {
-            for (_key, b) in self.buckets.iter() {
+            for b in self.buckets.values() {
                 let mut b = b.borrow_mut();
                 if b.is_dirty() {
                     self.dirty = true;

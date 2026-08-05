@@ -17,7 +17,7 @@ $(info ------------------------------------------)
 $(info Project: $(PROJECT_NAME) v$(PROJECT_VERSION))
 $(info ------------------------------------------)
 
-.PHONY: build b compile c run r benchmark benchmark-compare benchmark-memory benchmark-typed benchmark-write-verification fixtures operator operator-size package test t check check-all test-all clippy rustdoc fmt fmt-check loc-check clean verify release help h
+.PHONY: build b compile c run r benchmark benchmark-compare benchmark-memory benchmark-merge benchmark-typed benchmark-write-verification fixtures operator operator-size package test t check check-all test-all clippy rustdoc fmt fmt-check loc-check clean verify release help h
 
 build:
 	@$(CARGO) build --lib
@@ -43,6 +43,9 @@ benchmark-compare:
 
 benchmark-memory:
 	@$(CARGO) run --release --example benchmark_memory
+
+benchmark-merge:
+	@$(CARGO) run --release --example benchmark_merge
 
 benchmark-typed:
 	@$(CARGO) run --release --features typed --example benchmark_typed_reads
@@ -120,6 +123,7 @@ help:
 	@echo "  benchmark    Run the release-mode smoke benchmark"
 	@echo "  benchmark-compare  Compare Tagdata with jammdb 0.11.0"
 	@echo "  benchmark-memory   Measure reopen and write-transaction heap allocations"
+	@echo "  benchmark-merge    Merge two 500k-entry random KV databases"
 	@echo "  benchmark-typed    Compare direct typed scans with the previous lookup path"
 	@echo "  benchmark-write-verification  Compare write-safety policies"
 	@echo "  fixtures     Regenerate the frozen current-format fixture"

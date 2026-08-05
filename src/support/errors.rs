@@ -21,6 +21,8 @@ pub enum Error {
     WriterTimeout,
     /// A commit or initial allocation would exceed the configured file limit.
     CapacityExceeded { required: u64, maximum: u64 },
+    /// A merge encountered an entry rejected by its conflict policy.
+    MergeConflict { path: Vec<Vec<u8>> },
     /// Wrapper around a [`std::io::Error`] that occurred while opening the file or writing to it
     Io(std::io::Error),
     /// Wrapper around a [`PoisonError`]
@@ -47,6 +49,7 @@ impl fmt::Display for Error {
                 f,
                 "Database capacity exceeded: requires {required} bytes, maximum is {maximum} bytes"
             ),
+            Error::MergeConflict { path } => write!(f, "Merge conflict at {}", display_path(path)),
             Error::Io(e) => write!(f, "IO Error: {}", e),
             Error::Sync(s) => write!(f, "Sync Error: {}", s),
             Error::InvalidDB(s) => write!(f, "Invalid DB: {}", s),
@@ -93,11 +96,21 @@ impl PartialEq for Error {
                     maximum: maximum2,
                 },
             ) => required1 == required2 && maximum1 == maximum2,
+            (Error::MergeConflict { path: path1 }, Error::MergeConflict { path: path2 }) => {
+                path1 == path2
+            }
             (Error::Sync(s1), Error::Sync(s2)) => s1 == s2,
             (Error::InvalidDB(s1), Error::InvalidDB(s2)) => s1 == s2,
             _ => false,
         }
     }
+}
+
+fn display_path(path: &[Vec<u8>]) -> String {
+    path.iter()
+        .map(|part| String::from_utf8_lossy(part))
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 #[cfg(test)]

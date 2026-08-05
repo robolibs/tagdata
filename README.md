@@ -59,6 +59,37 @@ mutation applied plus the observed and resulting values. For
 `compare_exchange`, an expected value of `None` matches a missing key. A missing
 key is a conflict for `delete_if_value`.
 
+## Recursive merges
+
+`DB::merge_from` recursively combines every root and nested bucket in one
+source database with a destination database. The call commits one atomic write
+transaction. Existing destination entries that are absent from the source are
+retained, bucket sequence counters preserve the greater value, and the returned
+`MergeReport` counts inserted, updated, unchanged, skipped, created, and merged
+entries.
+
+```rust,no_run
+use tagdata::{DB, MergeConflictPolicy, MergeOptions};
+
+# fn merge() -> Result<(), tagdata::Error> {
+let source = DB::open("source.db")?;
+let destination = DB::open("destination.db")?;
+let report = destination.merge_from(
+    &source,
+    MergeOptions::new().conflict_policy(MergeConflictPolicy::Overwrite),
+)?;
+println!("inserted {} keys", report.keys_inserted);
+# Ok(())
+# }
+```
+
+`Overwrite` replaces conflicting values and key/value-versus-bucket shapes,
+`KeepExisting` retains destination entries, and `Error` rejects the first
+conflict with its binary bucket path while rolling back the database-level
+merge. `Bucket::merge_from` provides the same recursive behavior inside an
+existing caller-managed write transaction. TTL metadata follows the winning
+value, while durable journal history is not imported from the source.
+
 ## Typed codecs
 
 The raw byte API remains the default and adds no serialization dependency.
@@ -235,6 +266,11 @@ Cargo ignores release profiles declared by dependencies.
 `make benchmark-memory` reports peak heap growth and allocation calls while
 reopening and updating a 10,000-record database, making bootstrap scanning and
 optional change-tracking overhead visible.
+
+`make benchmark-merge` creates two 500,000-entry databases with randomized keys
+and values, applies a configurable overlap, merges both through `DB::merge_from`,
+and verifies the final key count, content fingerprint, and tree structure.
+`TAGDATA_MERGE_OVERLAP_PERCENT` defaults to `12.5`.
 Results are machine-specific and meaningful only when compared on the same
 host. Hot reads isolate lookup traversal, short transactions include snapshot
 coordination, and reopen reads include mapping and format inspection.
@@ -251,6 +287,7 @@ make test
 make benchmark
 make benchmark-compare
 make benchmark-memory
+make benchmark-merge
 make benchmark-typed
 make operator-size
 make verify
