@@ -118,6 +118,7 @@ mod tree;
 
 #[cfg(feature = "changefeed")]
 pub(crate) use api::journal;
+pub(crate) use api::merge;
 pub(crate) use api::ttl;
 pub(crate) use api::{bucket, changes, cursor, data, scoped, tx};
 pub(crate) use storage::format;
@@ -144,6 +145,7 @@ pub use errors::*;
 pub use format::FormatInfo;
 #[cfg(feature = "changefeed")]
 pub use journal::{JournalConfig, JournalGap, JournalReplay};
+pub use merge::{MergeConflictPolicy, MergeOptions, MergeReport};
 #[cfg(feature = "operator")]
 pub use operator::{SalvageManifest, SkippedRecord};
 pub use scoped::TransactionError;

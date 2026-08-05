@@ -95,6 +95,10 @@ pub struct Bucket<'b, 'tx: 'b> {
 }
 
 impl<'b, 'tx> Bucket<'b, 'tx> {
+    pub(crate) fn merge_next_int(&self, next_int: u64) {
+        self.inner.borrow_mut().merge_next_int(next_int);
+    }
+
     #[cfg(feature = "typed")]
     pub(crate) fn clone_handle(&self) -> Self {
         Self {
