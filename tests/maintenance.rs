@@ -1,3 +1,5 @@
+#![cfg(feature = "maintenance")]
+
 use std::{fs::File, io::Write};
 
 #[cfg(feature = "test-hooks")]

@@ -1,6 +1,6 @@
 use std::{
     ffi::OsString,
-    fs::{File, OpenOptions},
+    fs::{File, OpenOptions, TryLockError as FileTryLockError},
     path::{Path, PathBuf},
     sync::{
         Mutex, MutexGuard, TryLockError,
@@ -8,8 +8,6 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
-
-use fs4::FileExt;
 
 use crate::{Error, Result};
 
@@ -39,13 +37,13 @@ impl Coordination {
 
     pub(crate) fn shared_gate(&self) -> Result<GateGuard<'_>> {
         let gate = self.gate.lock()?;
-        FileExt::lock_shared(&*gate)?;
+        gate.lock_shared()?;
         Ok(GateGuard { gate })
     }
 
     pub(crate) fn exclusive_gate(&self) -> Result<GateGuard<'_>> {
         let gate = self.gate.lock()?;
-        FileExt::lock_exclusive(&*gate)?;
+        gate.lock()?;
         Ok(GateGuard { gate })
     }
 
@@ -55,10 +53,10 @@ impl Coordination {
             Err(TryLockError::WouldBlock) => return Ok(None),
             Err(TryLockError::Poisoned(_)) => return Err(Error::Sync("lock poisoned")),
         };
-        match FileExt::try_lock_exclusive(&*gate) {
+        match gate.try_lock() {
             Ok(()) => Ok(Some(GateGuard { gate })),
-            Err(error) if error.kind() == fs4::lock_contended_error().kind() => Ok(None),
-            Err(error) => Err(error.into()),
+            Err(FileTryLockError::WouldBlock) => Ok(None),
+            Err(FileTryLockError::Error(error)) => Err(error.into()),
         }
     }
 
@@ -81,7 +79,7 @@ impl Coordination {
                 .open(&path)
             {
                 Ok(file) => {
-                    FileExt::lock_shared(&file)?;
+                    file.lock_shared()?;
                     return Ok(ReaderRegistration { file, path });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -104,12 +102,12 @@ impl Coordination {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(error.into()),
             };
-            match FileExt::try_lock_exclusive(&file) {
+            match file.try_lock() {
                 Ok(()) => {
-                    FileExt::unlock(&file)?;
+                    file.unlock()?;
                     let _ = std::fs::remove_file(path);
                 }
-                Err(error) if error.kind() == fs4::lock_contended_error().kind() => {
+                Err(FileTryLockError::WouldBlock) => {
                     let tx_id = parse_tx_id(&entry.file_name()).ok_or_else(|| {
                         Error::InvalidDB(format!(
                             "active reader registration has an invalid name: {}",
@@ -119,7 +117,7 @@ impl Coordination {
                     count += 1;
                     oldest = Some(oldest.map_or(tx_id, |current| current.min(tx_id)));
                 }
-                Err(error) => return Err(error.into()),
+                Err(FileTryLockError::Error(error)) => return Err(error.into()),
             }
         }
         Ok((count, oldest))
@@ -132,7 +130,7 @@ pub(crate) struct GateGuard<'a> {
 
 impl Drop for GateGuard<'_> {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&*self.gate);
+        let _ = self.gate.unlock();
     }
 }
 
@@ -143,7 +141,7 @@ pub(crate) struct ReaderRegistration {
 
 impl Drop for ReaderRegistration {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.file);
+        let _ = self.file.unlock();
         let _ = std::fs::remove_file(&self.path);
     }
 }

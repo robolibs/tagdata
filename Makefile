@@ -17,7 +17,7 @@ $(info ------------------------------------------)
 $(info Project: $(PROJECT_NAME) v$(PROJECT_VERSION))
 $(info ------------------------------------------)
 
-.PHONY: build b compile c run r benchmark benchmark-compare benchmark-typed benchmark-write-verification fixtures operator package test t check check-all test-all clippy rustdoc fmt fmt-check clean verify release help h
+.PHONY: build b compile c run r benchmark benchmark-compare benchmark-memory benchmark-typed benchmark-write-verification fixtures operator operator-size package test t check check-all test-all clippy rustdoc fmt fmt-check loc-check clean verify release help h
 
 build:
 	@$(CARGO) build --lib
@@ -41,6 +41,9 @@ benchmark:
 benchmark-compare:
 	@$(CARGO) run --release --example benchmark_jammdb
 
+benchmark-memory:
+	@$(CARGO) run --release --example benchmark_memory
+
 benchmark-typed:
 	@$(CARGO) run --release --features typed --example benchmark_typed_reads
 
@@ -51,7 +54,10 @@ fixtures:
 	@$(CARGO) run --example fixture_gen
 
 operator:
-	@$(CARGO) build --release --bin inspace
+	@$(CARGO) build --release --features operator --bin inspace
+
+operator-size:
+	@$(CARGO) build --profile size --features operator --bin inspace
 
 package:
 	@$(CARGO) package --locked
@@ -79,13 +85,18 @@ clippy:
 rustdoc:
 	@RUSTDOCFLAGS="-Dwarnings" $(CARGO) doc --all-features --no-deps
 
+loc-check:
+	@find src tests examples -type f -name '*.rs' -print0 | \
+		xargs -0 wc -l | \
+		awk '$$2 != "total" && $$1 > 800 { print "error: " $$2 " has " $$1 " lines (maximum 800)"; failed = 1 } END { exit failed }'
+
 test-all:
 	@$(CARGO) test --all-targets --all-features
 
 clean:
 	@$(CARGO) clean
 
-verify: fmt-check check test check-all test-all clippy rustdoc
+verify: fmt-check loc-check check test check-all test-all clippy rustdoc
 
 release:
 	@if [ -z "$(HAS_REL)" ]; then \
@@ -108,10 +119,12 @@ help:
 	@echo "  run          Run a development example"
 	@echo "  benchmark    Run the release-mode smoke benchmark"
 	@echo "  benchmark-compare  Compare Inspace with jammdb 0.11.0"
+	@echo "  benchmark-memory   Measure reopen and write-transaction heap allocations"
 	@echo "  benchmark-typed    Compare direct typed scans with the previous lookup path"
 	@echo "  benchmark-write-verification  Compare write-safety policies"
 	@echo "  fixtures     Regenerate the frozen current-format fixture"
 	@echo "  operator     Build the release-mode operator CLI"
+	@echo "  operator-size  Build the size-optimized operator CLI"
 	@echo "  package      Verify and package the locked crate"
 	@echo "  test         Run all tests"
 	@echo "  check        Run cargo check on all targets"
@@ -120,6 +133,7 @@ help:
 	@echo "  clippy       Run clippy with warnings denied"
 	@echo "  rustdoc      Build docs with warnings denied"
 	@echo "  fmt          Format the workspace"
+	@echo "  loc-check    Reject Rust source or test files over 800 lines"
 	@echo "  fmt-check    Check formatting"
 	@echo "  clean        Remove Cargo build artifacts"
 	@echo "  verify       Run the full local gate"

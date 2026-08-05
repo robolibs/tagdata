@@ -8,7 +8,7 @@ use std::{
 use crate::{
     BucketName, KVPair,
     bucket::{Bucket, InnerBucket},
-    changes::ChangeTracker,
+    changes::{ChangePath, SharedChangeTracker},
     data::Data,
     freelist::TxFreelist,
     page::PageID,
@@ -60,8 +60,8 @@ pub struct Cursor<'b, 'tx> {
     bucket: Rc<RefCell<InnerBucket<'tx>>>,
     freelist: Rc<RefCell<TxFreelist>>,
     writable: bool,
-    path: Vec<Vec<u8>>,
-    changes: Rc<RefCell<ChangeTracker>>,
+    path: ChangePath,
+    changes: SharedChangeTracker,
     stack: Vec<SearchPath>,
     next_called: bool,
     previous_called: bool,
@@ -355,8 +355,8 @@ pub struct Buckets<'b, 'tx, I> {
     pub(crate) bucket: Rc<RefCell<InnerBucket<'tx>>>,
     pub(crate) freelist: Rc<RefCell<TxFreelist>>,
     pub(crate) writable: bool,
-    pub(crate) path: Vec<Vec<u8>>,
-    pub(crate) changes: Rc<RefCell<ChangeTracker>>,
+    pub(crate) path: ChangePath,
+    pub(crate) changes: SharedChangeTracker,
     pub(crate) _phantom: PhantomData<&'b ()>,
 }
 
@@ -371,8 +371,7 @@ where
             if let Data::Bucket(bucket_data) = data {
                 let mut b = self.bucket.borrow_mut();
                 if let Ok(r) = b.get_bucket(&bucket_data) {
-                    let mut path = self.path.clone();
-                    path.push(bucket_data.name().to_vec());
+                    let path = self.path.child(bucket_data.name());
                     return Some((
                         bucket_data,
                         Bucket {

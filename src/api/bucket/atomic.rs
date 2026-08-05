@@ -1,4 +1,7 @@
-use crate::{Error, Result, ToBytes, changes::ChangeOperation, node::Leaf};
+use crate::{Error, Result, ToBytes, node::Leaf};
+
+#[cfg(feature = "changefeed")]
+use crate::changes::ChangeOperation;
 
 use super::Bucket;
 
@@ -26,7 +29,8 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
     {
         self.ensure_atomic_write()?;
         let key = key.to_bytes();
-        let change_key = key.as_ref().to_vec();
+        #[cfg(feature = "changefeed")]
+        let change_key = key.clone();
         let value = value.to_bytes();
         let mut bucket = self.inner.borrow_mut();
         match bucket.get(key.as_ref()) {
@@ -42,9 +46,9 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
             None => {
                 let current = value.as_ref().to_vec();
                 bucket.put(key, value)?;
+                #[cfg(feature = "changefeed")]
                 self.changes
-                    .borrow_mut()
-                    .record(&self.path, &change_key, ChangeOperation::Put);
+                    .record(&self.path, change_key.as_ref(), ChangeOperation::Put);
                 Ok(AtomicResult {
                     applied: true,
                     observed: None,
@@ -69,7 +73,8 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
     {
         self.ensure_atomic_write()?;
         let key = key.to_bytes();
-        let change_key = key.as_ref().to_vec();
+        #[cfg(feature = "changefeed")]
+        let change_key = key.clone();
         let value = value.to_bytes();
         let mut bucket = self.inner.borrow_mut();
         let observed = match bucket.get(key.as_ref()) {
@@ -87,9 +92,9 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
 
         let current = value.as_ref().to_vec();
         bucket.put(key, value)?;
+        #[cfg(feature = "changefeed")]
         self.changes
-            .borrow_mut()
-            .record(&self.path, &change_key, ChangeOperation::Put);
+            .record(&self.path, change_key.as_ref(), ChangeOperation::Put);
         Ok(AtomicResult {
             applied: true,
             observed,
@@ -122,8 +127,8 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
         }
 
         bucket.delete(key.as_ref())?;
+        #[cfg(feature = "changefeed")]
         self.changes
-            .borrow_mut()
             .record(&self.path, key.as_ref(), ChangeOperation::Delete);
         Ok(AtomicResult {
             applied: true,

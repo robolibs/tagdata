@@ -74,6 +74,17 @@ codecs that do not declare ordering preservation. Decoding returns owned values;
 only the raw API claims mmap-backed zero-copy reads. `serde-codec` additionally
 enables the opt-in MessagePack value codec.
 
+The default build contains the raw database, integrity verification, TTL
+consistency, and write-safety policies. Optional features keep unused APIs out
+of constrained applications:
+
+- `bytes-interop`: accept `bytes::Bytes` without copying;
+- `changefeed`: process-local watches and the durable journal;
+- `maintenance`: backup and compaction APIs;
+- `operator`: the operator CLI and salvage APIs (includes `maintenance`);
+- `typed`: typed collections;
+- `serde-codec`: MessagePack typed values (includes `typed`).
+
 Codec selection is part of an application's schema. Store a schema/version key
 in the containing raw bucket (or use versioned bucket names), migrate values in
 a write transaction, and never change a live bucket's codec without rewriting
@@ -81,7 +92,8 @@ all entries. Raw and typed views may coexist when they follow the same schema.
 
 ## Change watches and TTL
 
-`DB::watch(capacity)` receives ordered, process-local `ChangeSet` values after a
+With `changefeed`, `DB::watch(capacity)` receives ordered, process-local
+`ChangeSet` values after a
 transaction is durably committed. Sets preserve transaction boundaries and IDs
 and contain bucket paths, keys, and operation types—not values. Delivery is
 best-effort with no durable replay or cross-process transport. Commit never
@@ -101,8 +113,9 @@ semantics.
 
 ## Durable change journal
 
-The default watch remains process-local and best-effort. Applications that need
-replay can opt into a journal stored atomically inside the user transaction:
+With `changefeed`, watches remain process-local and best-effort. Applications
+that need replay can opt into a journal stored atomically inside the user
+transaction:
 
 ```rust,no_run
 use inspace::{DB, JournalConfig};
@@ -171,9 +184,10 @@ Writable handles coordinate through a sibling `.inspace` directory. Reader
 registrations are removed automatically, including stale registrations left by
 terminated processes. Keep that directory beside the database while it is live.
 
-Use `DB::backup_to` for an atomically published snapshot, `DB::backup_writer` to
-stream a snapshot, and `DB::compact_to` to rewrite only live data into a smaller
-file. Maintenance operations never replace the source database.
+With `maintenance`, use `DB::backup_to` for an atomically published snapshot,
+`DB::backup_writer` to stream a snapshot, and `DB::compact_to` to rewrite only
+live data into a smaller file. Maintenance operations never replace the source
+database.
 
 Inspace has one current on-disk format. Each allocated page block ends with a
 SHA3-256 checksum covering its header and payload. Page bounds, element counts,
@@ -212,6 +226,15 @@ controlled by `INSPACE_BENCH_ITEMS`, `INSPACE_BENCH_READS`,
 `make benchmark-write-verification` reports median commit latency for Standard,
 ReadBack, and Full policies. `INSPACE_BENCH_ITEMS` controls database size and
 `INSPACE_BENCH_SAMPLES` controls repetitions.
+
+`make operator-size` builds the operator with size optimization, whole-program
+LTO, one codegen unit, abort-on-panic, and stripped symbols. Applications that
+embed Inspace must define equivalent profile settings in their own workspace;
+Cargo ignores release profiles declared by dependencies.
+
+`make benchmark-memory` reports peak heap growth and allocation calls while
+reopening and updating a 10,000-record database, making bootstrap scanning and
+optional change-tracking overhead visible.
 Results are machine-specific and meaningful only when compared on the same
 host. Hot reads isolate lookup traversal, short transactions include snapshot
 coordination, and reopen reads include mapping and format inspection.
@@ -227,6 +250,8 @@ make run
 make test
 make benchmark
 make benchmark-compare
+make benchmark-memory
 make benchmark-typed
+make operator-size
 make verify
 ```

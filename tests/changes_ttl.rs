@@ -1,3 +1,5 @@
+#![cfg(feature = "changefeed")]
+
 use std::{
     sync::mpsc::TryRecvError,
     time::{Duration, UNIX_EPOCH},

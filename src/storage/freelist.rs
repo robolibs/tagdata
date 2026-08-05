@@ -53,7 +53,7 @@ impl<'a> TxFreelist {
             bytes < (size_of::<Page>() as u64)
         );
         let required_bytes = bytes + CHECKSUM_SIZE as u64;
-        let num_pages = if required_bytes % self.meta.pagesize == 0 {
+        let num_pages = if required_bytes.is_multiple_of(self.meta.pagesize) {
             required_bytes / self.meta.pagesize
         } else {
             (required_bytes / self.meta.pagesize) + 1

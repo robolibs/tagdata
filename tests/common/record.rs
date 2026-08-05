@@ -86,7 +86,7 @@ impl TestDetails {
                         }
                         let value = rand_bytes(self.value_size.num());
                         instructions.push(Instruction::InsertKV(key.clone(), value.clone()));
-                        b.put(key.clone(), value.clone())?;
+                        b.put(key.to_vec(), value.to_vec())?;
                         data.insert(key, FakeNode::Value(value));
                     }
                     if !was_empty {
@@ -97,7 +97,7 @@ impl TestDetails {
                             let value = rand_bytes(self.value_size.num());
 
                             instructions.push(Instruction::InsertKV(key.clone(), value.clone()));
-                            let db_existing = b.put(key, value.clone())?;
+                            let db_existing = b.put(key.to_vec(), value.to_vec())?;
                             let existing = data.insert(key.clone(), FakeNode::Value(value.clone()));
 
                             assert!(db_existing.is_some());
@@ -381,7 +381,7 @@ pub fn log_playback(name: &str) -> Result<(), Error> {
                     &mut root,
                     &bucket_path,
                     |bucket, data_bucket| {
-                        bucket.put(k, v)?;
+                        bucket.put(k.to_vec(), v.to_vec())?;
                         data_bucket.insert(k.clone(), FakeNode::Value(v.clone()));
                         Ok(())
                     },
@@ -393,7 +393,7 @@ pub fn log_playback(name: &str) -> Result<(), Error> {
                     &mut root,
                     &bucket_path,
                     |bucket, data_bucket| {
-                        let existing = bucket.put(k, v)?;
+                        let existing = bucket.put(k.to_vec(), v.to_vec())?;
                         assert!(existing.is_some());
                         data_bucket.insert(k.clone(), FakeNode::Value(v.clone()));
                         Ok(())
@@ -423,10 +423,10 @@ where
     F: Fn(&Bucket, &mut BTreeMap<Bytes, FakeNode>) -> Result<(), Error>,
 {
     assert!(!path.is_empty());
-    let mut b = tx.get_or_create_bucket(&path[0])?;
+    let mut b = tx.get_or_create_bucket(path[0].to_vec())?;
     let mut node = root.sub_bucket(path[0].clone());
     for name in path[1..].iter() {
-        b = b.get_or_create_bucket(name)?;
+        b = b.get_or_create_bucket(name.to_vec())?;
         node = node.sub_bucket(name.clone());
     }
     let data_bucket = node.unwrap_bucket();

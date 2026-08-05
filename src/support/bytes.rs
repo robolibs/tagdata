@@ -25,7 +25,7 @@ macro_rules! byte_array_to_bytes {
     $(
         impl<'a> ToBytes<'a> for [u8; $n] {
             fn to_bytes(self) -> Bytes<'a> {
-                Bytes::Bytes(bytes::Bytes::copy_from_slice(&self))
+                Bytes::Owned(Rc::from(self.as_slice()))
             }
         }
     )*
@@ -49,12 +49,14 @@ impl<'a> ToBytes<'a> for Vec<u8> {
     }
 }
 
+#[cfg(feature = "bytes-interop")]
 impl<'a> ToBytes<'a> for bytes::Bytes {
     fn to_bytes(self) -> Bytes<'a> {
         Bytes::Bytes(self)
     }
 }
 
+#[cfg(feature = "bytes-interop")]
 impl<'a> ToBytes<'a> for &bytes::Bytes {
     fn to_bytes(self) -> Bytes<'a> {
         Bytes::Bytes(self.clone())
@@ -76,6 +78,8 @@ impl<'a> ToBytes<'a> for &Bytes<'a> {
 #[derive(Debug, Clone)]
 pub enum Bytes<'a> {
     Slice(&'a [u8]),
+    Owned(Rc<[u8]>),
+    #[cfg(feature = "bytes-interop")]
     Bytes(bytes::Bytes),
     Vec(Rc<Vec<u8>>),
     String(Rc<String>),
@@ -85,6 +89,8 @@ impl<'a> Bytes<'a> {
     pub fn size(&self) -> usize {
         match self {
             Self::Slice(s) => s.len(),
+            Self::Owned(s) => s.len(),
+            #[cfg(feature = "bytes-interop")]
             Self::Bytes(b) => b.len(),
             Self::Vec(v) => v.len(),
             Self::String(s) => s.len(),
@@ -96,6 +102,8 @@ impl<'a> AsRef<[u8]> for Bytes<'a> {
     fn as_ref(&self) -> &[u8] {
         match self {
             Self::Slice(s) => s,
+            Self::Owned(s) => s,
+            #[cfg(feature = "bytes-interop")]
             Self::Bytes(b) => b,
             Self::Vec(v) => v.as_slice(),
             Self::String(s) => s.as_bytes(),

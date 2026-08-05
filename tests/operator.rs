@@ -1,3 +1,5 @@
+#![cfg(feature = "operator")]
+
 use std::{
     fs::OpenOptions as FileOpenOptions,
     io::{Read, Seek, SeekFrom, Write},

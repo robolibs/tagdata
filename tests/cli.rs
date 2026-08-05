@@ -1,3 +1,5 @@
+#![cfg(feature = "operator")]
+
 use std::process::Command;
 
 use inspace::{DB, Error, FORMAT_VERSION};

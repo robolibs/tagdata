@@ -1,20 +1,18 @@
 use std::{
     cell::RefCell,
     collections::HashSet,
-    fs::File,
+    fs::{File, TryLockError as FileTryLockError},
     io::{Read, Seek, SeekFrom, Write},
     marker::PhantomData,
     rc::Rc,
     sync::MutexGuard,
 };
 
-use fs4::FileExt;
-
 use crate::{
     BucketName,
     bucket::{Bucket, BucketMeta, InnerBucket},
     bytes::ToBytes,
-    changes::{ChangeOperation, ChangeTracker},
+    changes::{ChangePath, SharedChangeTracker},
     coordination::{GateGuard, ReaderRegistration},
     cursor::ToBuckets,
     db::{DB, DBInner, FORMAT_VERSION, WriteVerification},
@@ -25,6 +23,9 @@ use crate::{
     page::{Page, PageID, Pages, seal_block},
     support::failpoints,
 };
+
+#[cfg(feature = "changefeed")]
+use crate::changes::ChangeOperation;
 
 pub(crate) struct WriteGuard<'tx> {
     file: MutexGuard<'tx, File>,
@@ -37,14 +38,14 @@ impl<'tx> WriteGuard<'tx> {
         loop {
             let gate = coordination.exclusive_gate()?;
             let file = db.inner.file.lock()?;
-            match FileExt::try_lock_exclusive(&*file) {
+            match file.try_lock() {
                 Ok(()) => return Ok(Self { file, _gate: gate }),
-                Err(error) if error.kind() == fs4::lock_contended_error().kind() => {
+                Err(FileTryLockError::WouldBlock) => {
                     drop(file);
                     drop(gate);
                     std::thread::sleep(std::time::Duration::from_millis(2));
                 }
-                Err(error) => return Err(error.into()),
+                Err(FileTryLockError::Error(error)) => return Err(error.into()),
             }
         }
     }
@@ -61,17 +62,17 @@ impl<'tx> WriteGuard<'tx> {
                 return Err(Error::Sync("lock poisoned"));
             }
         };
-        match FileExt::try_lock_exclusive(&*file) {
+        match file.try_lock() {
             Ok(()) => Ok(Some(Self { file, _gate: gate })),
-            Err(error) if error.kind() == fs4::lock_contended_error().kind() => Ok(None),
-            Err(error) => Err(error.into()),
+            Err(FileTryLockError::WouldBlock) => Ok(None),
+            Err(FileTryLockError::Error(error)) => Err(error.into()),
         }
     }
 }
 
 impl Drop for WriteGuard<'_> {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&*self.file);
+        let _ = self.file.unlock();
     }
 }
 
@@ -160,7 +161,7 @@ pub(crate) struct TxInner<'tx> {
     pub(crate) root: Rc<RefCell<InnerBucket<'tx>>>,
     pub(crate) meta: Meta,
     pub(crate) freelist: Rc<RefCell<TxFreelist>>,
-    pub(crate) changes: Rc<RefCell<ChangeTracker>>,
+    pub(crate) changes: SharedChangeTracker,
     pages: Pages,
     num_freelist_pages: u64,
 }
@@ -246,7 +247,7 @@ impl<'tx> Tx<'tx> {
             )
         };
         let freelist = Rc::new(RefCell::new(TxFreelist::new(meta.clone(), freelist)));
-        let changes = ChangeTracker::shared(writable);
+        let changes = SharedChangeTracker::new(writable);
 
         let data = db.inner.data.lock()?.clone();
         let pages = Pages::new(data, db.inner.pagesize);
@@ -283,7 +284,7 @@ impl<'tx> Tx<'tx> {
     pub fn get_bucket<'b, T: ToBytes<'tx>>(&'b self, name: T) -> Result<Bucket<'b, 'tx>> {
         let tx = self.inner.borrow();
         let name = name.to_bytes();
-        let path = vec![name.as_ref().to_vec()];
+        let path = ChangePath::root(name.as_ref());
         let mut root = tx.root.borrow_mut();
         let inner = root.get_bucket(&name)?;
         Ok(Bucket {
@@ -309,17 +310,20 @@ impl<'tx> Tx<'tx> {
             return Err(Error::ReadOnlyTx);
         }
         let name = name.to_bytes();
-        let key = name.as_ref().to_vec();
+        let path = ChangePath::root(name.as_ref());
         let mut root = tx.root.borrow_mut();
         let inner = root.create_bucket(name)?;
-        tx.changes
-            .borrow_mut()
-            .record(&[], &key, ChangeOperation::BucketCreate);
+        #[cfg(feature = "changefeed")]
+        tx.changes.record(
+            &ChangePath::default(),
+            path.leaf(),
+            ChangeOperation::BucketCreate,
+        );
         Ok(Bucket {
             inner,
             freelist: tx.freelist.clone(),
             writable: true,
-            path: vec![key],
+            path,
             changes: tx.changes.clone(),
             _phantom: PhantomData,
         })
@@ -338,20 +342,24 @@ impl<'tx> Tx<'tx> {
             return Err(Error::ReadOnlyTx);
         }
         let name = name.to_bytes();
-        let key = name.as_ref().to_vec();
+        let path = ChangePath::root(name.as_ref());
         let mut root = tx.root.borrow_mut();
+        #[cfg(feature = "changefeed")]
         let existed = root.get_bucket(&name).is_ok();
         let inner = root.get_or_create_bucket(name)?;
+        #[cfg(feature = "changefeed")]
         if !existed {
-            tx.changes
-                .borrow_mut()
-                .record(&[], &key, ChangeOperation::BucketCreate);
+            tx.changes.record(
+                &ChangePath::default(),
+                path.leaf(),
+                ChangeOperation::BucketCreate,
+            );
         }
         Ok(Bucket {
             inner,
             freelist: tx.freelist.clone(),
             writable: true,
-            path: vec![key],
+            path,
             changes: tx.changes.clone(),
             _phantom: PhantomData,
         })
@@ -370,14 +378,18 @@ impl<'tx> Tx<'tx> {
             return Err(Error::ReadOnlyTx);
         }
         let key = key.to_bytes();
-        let change_key = key.as_ref().to_vec();
+        #[cfg(feature = "changefeed")]
+        let change_key = key.clone();
         let freelist = tx.freelist.clone();
         let mut freelist = freelist.borrow_mut();
         let mut root = tx.root.borrow_mut();
         root.delete_bucket(key, &mut freelist)?;
-        tx.changes
-            .borrow_mut()
-            .record(&[], &change_key, ChangeOperation::BucketDelete);
+        #[cfg(feature = "changefeed")]
+        tx.changes.record(
+            &ChangePath::default(),
+            change_key.as_ref(),
+            ChangeOperation::BucketDelete,
+        );
         Ok(())
     }
 
@@ -388,7 +400,7 @@ impl<'tx> Tx<'tx> {
             inner: tx.root.clone(),
             freelist: tx.freelist.clone(),
             writable: tx.lock.writable(),
-            path: Vec::new(),
+            path: ChangePath::default(),
             changes: tx.changes.clone(),
             _phantom: PhantomData,
         };
@@ -408,8 +420,11 @@ impl<'tx> Tx<'tx> {
             return Err(Error::ReadOnlyTx);
         }
         let mut tx = self.inner.borrow_mut();
-        let journal_changes = tx.changes.borrow().snapshot(tx.meta.tx_id);
-        crate::journal::persist(&mut tx, &journal_changes)?;
+        #[cfg(feature = "changefeed")]
+        {
+            let journal_changes = tx.changes.snapshot(tx.meta.tx_id);
+            crate::journal::persist(&mut tx, &journal_changes)?;
+        }
         let freelist = tx.freelist.clone();
         let mut freelist = freelist.borrow_mut();
         let meta = {
@@ -567,8 +582,11 @@ impl<'tx> TxInner<'tx> {
                 .inner
                 .bytes_written
                 .fetch_add(written, std::sync::atomic::Ordering::Relaxed);
-            let changes = self.changes.borrow_mut().finish(self.meta.tx_id);
-            self.db.inner.watches.publish(changes);
+            #[cfg(feature = "changefeed")]
+            self.db
+                .inner
+                .watches
+                .publish(self.changes.finish(self.meta.tx_id));
             Ok(())
         } else {
             unreachable!()

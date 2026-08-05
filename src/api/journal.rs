@@ -2,7 +2,8 @@ use std::marker::PhantomData;
 
 use crate::{
     Bucket, Change, ChangeOperation, ChangeSet, DB, Error, Result, WatchFilter,
-    changes::JOURNAL_BUCKET, tx::TxInner,
+    changes::{ChangePath, JOURNAL_BUCKET},
+    tx::TxInner,
 };
 
 const CONFIG_KEY: &[u8] = b"config";
@@ -129,7 +130,7 @@ pub(crate) fn persist(tx: &mut TxInner<'_>, changes: &ChangeSet) -> Result<()> {
         inner,
         freelist: tx.freelist.clone(),
         writable: true,
-        path: vec![JOURNAL_BUCKET.to_vec()],
+        path: ChangePath::root(JOURNAL_BUCKET),
         changes: tx.changes.clone(),
         _phantom: PhantomData,
     };

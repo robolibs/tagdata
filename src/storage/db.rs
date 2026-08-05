@@ -3,20 +3,23 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::{
     fs::{File, OpenOptions as FileOpenOptions},
     io::Write,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
 
-use fs4::FileExt;
+#[cfg(feature = "maintenance")]
+use std::path::PathBuf;
+
 use memmap2::Mmap;
 use page_size::get as get_page_size;
 
+use super::file::allocate;
+
 use crate::{
     bucket::BucketMeta,
-    changes::WatchHub,
     coordination::Coordination,
     errors::{Error, Result},
     format::FormatInfo,
@@ -463,8 +466,10 @@ pub(crate) struct DBInner {
     pub(crate) growth_increment: u64,
     pub(crate) committed_transactions: AtomicU64,
     pub(crate) bytes_written: AtomicU64,
+    #[cfg(feature = "maintenance")]
     pub(crate) path: PathBuf,
-    pub(crate) watches: WatchHub,
+    #[cfg(feature = "changefeed")]
+    pub(crate) watches: crate::changes::WatchHub,
 }
 
 impl DBInner {
@@ -477,7 +482,7 @@ impl DBInner {
         growth_increment: u64,
     ) -> Result<DBInner> {
         if flags.read_only {
-            FileExt::lock_shared(&file)?;
+            file.lock_shared()?;
         }
         let coordination = if flags.read_only {
             None
@@ -507,8 +512,10 @@ impl DBInner {
             flags,
             committed_transactions: AtomicU64::new(0),
             bytes_written: AtomicU64::new(0),
+            #[cfg(feature = "maintenance")]
             path: path.to_path_buf(),
-            watches: WatchHub::new(),
+            #[cfg(feature = "changefeed")]
+            watches: crate::changes::WatchHub::new(),
         };
 
         {
@@ -522,7 +529,7 @@ impl DBInner {
     }
 
     pub(crate) fn resize(&self, file: &File, new_size: u64) -> Result<Arc<Mmap>> {
-        file.allocate(new_size)?;
+        allocate(file, new_size)?;
         let mut data = self.data.lock()?;
         let mmap = mmap(file, self.flags.mmap_populate)?;
         *data = Arc::new(mmap);
@@ -600,7 +607,7 @@ impl DBInner {
 
 fn init_file(path: &Path, pagesize: u64, num_pages: usize, direct_write: bool) -> Result<File> {
     let mut file = open_file(path, true, direct_write, false)?;
-    file.allocate(pagesize * (num_pages as u64))?;
+    allocate(&file, pagesize * (num_pages as u64))?;
     let mut buf = vec![0; (pagesize * 4) as usize];
     let mut get_page = |index: u64| {
         #[allow(clippy::cast_ptr_alignment)]

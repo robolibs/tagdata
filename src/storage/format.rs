@@ -29,10 +29,23 @@ impl FormatInfo {
     pub fn inspect(path: impl AsRef<Path>) -> Result<Self> {
         let mut file = File::open(path)?;
         let file_bytes = file.metadata()?.len();
+        let header = offset_of!(Page, ptr) + size_of::<Meta>();
+        let primary_len = header.min(usize::try_from(file_bytes).unwrap_or(usize::MAX));
+        let mut primary = vec![0; primary_len];
+        file.read_exact(&mut primary)?;
+        // Skip the bounded recovery scan only when both redundant metadata
+        // pages authenticate under the page size declared by page zero.
+        if let Some(page_size) = metadata_page_size(&primary, 0, 0)
+            && let Ok((info, 2)) = inspect_candidate(&mut file, file_bytes, page_size)
+        {
+            return Ok(info);
+        }
+
         let scan_len = file_bytes.min(MAX_BOOTSTRAP_SCAN);
         let scan_len = usize::try_from(scan_len)
             .map_err(|_| Error::InvalidDB("bootstrap scan is too large".into()))?;
         let mut prefix = vec![0; scan_len];
+        file.seek(SeekFrom::Start(0))?;
         file.read_exact(&mut prefix)?;
 
         let mut candidates = BTreeSet::new();
@@ -51,7 +64,7 @@ impl FormatInfo {
 
         let mut valid = Vec::new();
         for page_size in candidates {
-            if let Ok(info) = inspect_candidate(&mut file, file_bytes, page_size) {
+            if let Ok((info, _)) = inspect_candidate(&mut file, file_bytes, page_size) {
                 valid.push(info);
             }
         }
@@ -88,7 +101,11 @@ fn metadata_page_size(bytes: &[u8], offset: usize, expected_id: u64) -> Option<u
         .then_some(page_size)
 }
 
-fn inspect_candidate(file: &mut File, file_bytes: u64, page_size: u64) -> Result<FormatInfo> {
+fn inspect_candidate(
+    file: &mut File,
+    file_bytes: u64,
+    page_size: u64,
+) -> Result<(FormatInfo, usize)> {
     let bootstrap_len = page_size
         .checked_mul(2)
         .ok_or_else(|| Error::InvalidDB("bootstrap length overflow".into()))?;
@@ -113,17 +130,21 @@ fn inspect_candidate(file: &mut File, file_bytes: u64, page_size: u64) -> Result
             valid.push(current.clone());
         }
     }
+    let valid_pages = valid.len();
     let meta = valid
         .into_iter()
         .max_by_key(|meta: &Meta| meta.tx_id)
         .ok_or_else(|| Error::InvalidDB("no valid metadata pages".into()))?;
-    Ok(FormatInfo {
-        page_size,
-        version: meta.version,
-        transaction_id: meta.tx_id,
-        metadata_page: meta.meta_page,
-        file_bytes,
-    })
+    Ok((
+        FormatInfo {
+            page_size,
+            version: meta.version,
+            transaction_id: meta.tx_id,
+            metadata_page: meta.meta_page,
+            file_bytes,
+        },
+        valid_pages,
+    ))
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {

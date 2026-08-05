@@ -1,17 +1,23 @@
+#[cfg(feature = "changefeed")]
 use std::{
     cell::RefCell,
     rc::Rc,
     sync::{Arc, Mutex, mpsc},
 };
 
+#[cfg(feature = "changefeed")]
 use crate::{DB, Result};
 
+#[cfg(feature = "changefeed")]
 const MAX_CHANGES: usize = 4096;
+#[cfg(feature = "changefeed")]
 const MAX_CHANGE_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const TTL_BUCKET: &[u8] = b"\0inspace.ttl.lookup";
 pub(crate) const TTL_DEADLINES_BUCKET: &[u8] = b"\0inspace.ttl.deadlines";
+#[cfg(feature = "changefeed")]
 pub(crate) const JOURNAL_BUCKET: &[u8] = b"\0inspace.journal";
 
+#[cfg(feature = "changefeed")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ChangeOperation {
     Put,
@@ -21,6 +27,7 @@ pub enum ChangeOperation {
     Expire,
 }
 
+#[cfg(feature = "changefeed")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Change {
     pub bucket_path: Vec<Vec<u8>>,
@@ -28,6 +35,7 @@ pub struct Change {
     pub operation: ChangeOperation,
 }
 
+#[cfg(feature = "changefeed")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChangeSet {
     pub transaction_id: u64,
@@ -36,11 +44,13 @@ pub struct ChangeSet {
     pub truncated: bool,
 }
 
+#[cfg(feature = "changefeed")]
 pub struct WatchSubscription {
     receiver: mpsc::Receiver<ChangeSet>,
     terminal: Arc<Mutex<Option<WatchError>>>,
 }
 
+#[cfg(feature = "changefeed")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WatchError {
     Empty,
@@ -49,6 +59,7 @@ pub enum WatchError {
 }
 
 /// Best-effort process-local watch selection.
+#[cfg(feature = "changefeed")]
 #[derive(Clone, Debug, Default)]
 pub struct WatchFilter {
     bucket_path: Option<Vec<Vec<u8>>>,
@@ -57,6 +68,7 @@ pub struct WatchFilter {
     operations: Vec<ChangeOperation>,
 }
 
+#[cfg(feature = "changefeed")]
 impl WatchFilter {
     pub fn new() -> Self {
         Self::default()
@@ -123,12 +135,14 @@ impl WatchFilter {
     }
 }
 
+#[cfg(feature = "changefeed")]
 struct WatchSender {
     sender: mpsc::SyncSender<ChangeSet>,
     filter: WatchFilter,
     terminal: Arc<Mutex<Option<WatchError>>>,
 }
 
+#[cfg(feature = "changefeed")]
 impl WatchSubscription {
     pub fn recv(&self) -> std::result::Result<ChangeSet, mpsc::RecvError> {
         self.receiver.recv()
@@ -158,10 +172,12 @@ impl WatchSubscription {
     }
 }
 
+#[cfg(feature = "changefeed")]
 pub(crate) struct WatchHub {
     senders: Mutex<Vec<WatchSender>>,
 }
 
+#[cfg(feature = "changefeed")]
 impl WatchHub {
     pub(crate) fn new() -> Self {
         Self {
@@ -217,23 +233,106 @@ impl WatchHub {
     }
 }
 
-pub(crate) struct ChangeTracker {
+#[derive(Clone)]
+pub(crate) struct SharedChangeTracker {
+    #[cfg(feature = "changefeed")]
+    inner: Rc<RefCell<ChangeTracker>>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ChangePath {
+    #[cfg(feature = "changefeed")]
+    inner: Vec<Vec<u8>>,
+}
+
+impl ChangePath {
+    pub(crate) fn root(key: &[u8]) -> Self {
+        #[cfg(feature = "changefeed")]
+        {
+            Self {
+                inner: vec![key.to_vec()],
+            }
+        }
+        #[cfg(not(feature = "changefeed"))]
+        {
+            let _ = key;
+            Self {}
+        }
+    }
+
+    pub(crate) fn child(&self, key: &[u8]) -> Self {
+        #[cfg(feature = "changefeed")]
+        {
+            let mut inner = self.inner.clone();
+            inner.push(key.to_vec());
+            Self { inner }
+        }
+        #[cfg(not(feature = "changefeed"))]
+        {
+            let _ = key;
+            Self {}
+        }
+    }
+
+    #[cfg(feature = "changefeed")]
+    fn as_slice(&self) -> &[Vec<u8>] {
+        &self.inner
+    }
+
+    #[cfg(feature = "changefeed")]
+    pub(crate) fn leaf(&self) -> &[u8] {
+        self.inner.last().map_or(&[], Vec::as_slice)
+    }
+}
+
+impl SharedChangeTracker {
+    pub(crate) fn new(enabled: bool) -> Self {
+        #[cfg(feature = "changefeed")]
+        {
+            Self {
+                inner: Rc::new(RefCell::new(ChangeTracker {
+                    enabled,
+                    bytes: 0,
+                    changes: Vec::new(),
+                    truncated: false,
+                })),
+            }
+        }
+        #[cfg(not(feature = "changefeed"))]
+        {
+            let _ = enabled;
+            Self {}
+        }
+    }
+
+    #[cfg(feature = "changefeed")]
+    pub(crate) fn record(&self, path: &ChangePath, key: &[u8], operation: ChangeOperation) {
+        self.inner
+            .borrow_mut()
+            .record(path.as_slice(), key, operation);
+    }
+
+    #[cfg(feature = "changefeed")]
+    pub(crate) fn finish(&self, transaction_id: u64) -> ChangeSet {
+        self.inner.borrow_mut().finish(transaction_id)
+    }
+
+    #[cfg(feature = "changefeed")]
+    pub(crate) fn snapshot(&self, transaction_id: u64) -> ChangeSet {
+        self.inner.borrow().snapshot(transaction_id)
+    }
+}
+
+#[cfg(feature = "changefeed")]
+struct ChangeTracker {
     enabled: bool,
     bytes: usize,
     changes: Vec<Change>,
     truncated: bool,
 }
 
+#[cfg(feature = "changefeed")]
 impl ChangeTracker {
-    pub(crate) fn shared(enabled: bool) -> Rc<RefCell<Self>> {
-        Rc::new(RefCell::new(Self {
-            enabled,
-            bytes: 0,
-            changes: Vec::new(),
-            truncated: false,
-        }))
-    }
-
     pub(crate) fn record(&mut self, path: &[Vec<u8>], key: &[u8], operation: ChangeOperation) {
         if !self.enabled
             || key == TTL_BUCKET
@@ -278,6 +377,7 @@ impl ChangeTracker {
     }
 }
 
+#[cfg(feature = "changefeed")]
 impl DB {
     /// Subscribes to best-effort, process-local committed change sets.
     ///

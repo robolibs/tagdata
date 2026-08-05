@@ -2,9 +2,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
     Bucket, DB, Error, KVPair, Result, ToBytes,
-    changes::{ChangeOperation, TTL_BUCKET, TTL_DEADLINES_BUCKET},
+    changes::{TTL_BUCKET, TTL_DEADLINES_BUCKET},
     node::Leaf,
 };
+
+#[cfg(feature = "changefeed")]
+use crate::changes::ChangeOperation;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TtlWriteResult {
@@ -132,8 +135,8 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
                 Some(Leaf::Kv(_, _)) => {
                     bucket.delete(key)?;
                     drop(bucket);
+                    #[cfg(feature = "changefeed")]
                     self.changes
-                        .borrow_mut()
                         .record(&self.path, key, ChangeOperation::Expire);
                 }
                 Some(Leaf::Bucket(_, _)) => return Err(Error::IncompatibleValue),

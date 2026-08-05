@@ -234,3 +234,45 @@ Completion evidence on the development host (10,000 records, five medians):
 - Injected dirty-page and metadata corruption was rejected before publication.
 - All six crash boundaries recovered a complete old or new snapshot.
 - `make verify` passed and the largest Rust file remained 766 lines.
+
+## Size and memory branch experiment
+
+The `memory` branch reduces the default dependency graph and removes dormant
+runtime state while preserving mmap reads, checksums, readback verification,
+TTL consistency, and the current format. It replaces `fs4` locking with Rust
+1.89 standard-library locks, keeps physical file allocation in a small internal
+platform module, makes `bytes` interoperability optional, inlines the metadata
+FNV calculation, disables unnecessary SHA3 and Serde features, and gates
+changefeeds, maintenance, and the operator behind explicit Cargo features.
+Healthy reopen avoids the 16 MiB recovery scan when both fixed metadata pages
+validate; damaged metadata still falls back to the original bounded scan.
+
+Final acceptance requires `make verify`, the 800-line limit, current-format
+fixture compatibility, and like-for-like dependency, artifact-size, read, and
+write comparisons against `main`.
+
+### Completion evidence
+
+Compared with `main` at `a6d1b6b` on the same Linux host:
+
+- the default production dependency graph fell from 18 to 12 packages. The six
+  removed entries are `bytes`, `fnv`, `fs4`, `bitflags`, `rustix`, and
+  `linux-raw-sys`;
+- the stripped operator fell from 815,928 to 766,776 bytes (6.02%); the same
+  size-profile settings reduced it from 516,896 to 500,440 bytes (3.18%);
+- reopening a 10,000-record database reduced peak heap growth from 8,528,264
+  to 8,584 bytes (99.90%). Updating all 10,000 records reduced peak heap growth
+  from 4,014,184 to 3,235,960 bytes (19.39%) and allocation calls from 65,910
+  to 31,032 (52.92%);
+- in a nine-sample, 128-byte-value comparison, absolute Inspace throughput was
+  within normal benchmark variation or better: batched writes +5.76%, hot point
+  reads +3.97%, one-lookup transactions -0.09%, overlapping snapshots +1.05%,
+  and ordered scans +10.64%. Reopen plus 10,000 point reads improved from
+  25.37 ms to 5.18 ms, or 4.90x the `main` throughput;
+- `make verify`, `make loc-check`, the frozen current-format fixture, and
+  `RUSTUP_TOOLCHAIN=1.89.0 make check-all` pass. The largest Rust file is 784
+  lines.
+
+These are local measurements, not portable performance promises. The format,
+checksums, copy-on-write publication, default readback verification, and TTL
+consistency are unchanged.

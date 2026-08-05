@@ -116,8 +116,12 @@ mod storage;
 mod support;
 mod tree;
 
-pub(crate) use api::{bucket, changes, cursor, data, journal, scoped, ttl, tx};
+#[cfg(feature = "changefeed")]
+pub(crate) use api::journal;
+pub(crate) use api::ttl;
+pub(crate) use api::{bucket, changes, cursor, data, scoped, tx};
 pub(crate) use storage::format;
+#[cfg(feature = "operator")]
 pub(crate) use storage::operator;
 pub(crate) use storage::verification;
 pub(crate) use storage::{coordination, db, freelist, meta, page, stats};
@@ -131,13 +135,16 @@ mod typed;
 mod application;
 
 pub use bucket::{AtomicResult, Bucket};
+#[cfg(feature = "changefeed")]
 pub use changes::{Change, ChangeOperation, ChangeSet, WatchError, WatchFilter, WatchSubscription};
 pub use cursor::{Buckets, Cursor, KVPairs, ToBuckets, ToKVPairs};
 pub use data::*;
 pub use db::{DB, FORMAT_VERSION, OpenOptions, WriteVerification};
 pub use errors::*;
 pub use format::FormatInfo;
+#[cfg(feature = "changefeed")]
 pub use journal::{JournalConfig, JournalGap, JournalReplay};
+#[cfg(feature = "operator")]
 pub use operator::{SalvageManifest, SkippedRecord};
 pub use scoped::TransactionError;
 pub use stats::Stats;

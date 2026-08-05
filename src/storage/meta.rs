@@ -1,8 +1,7 @@
-use std::hash::Hasher;
-
-use fnv::FnvHasher;
-
 use crate::{bucket::BucketMeta, page::PageID};
+
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 #[repr(C)]
 #[derive(Debug, Clone)]
@@ -24,20 +23,25 @@ impl Meta {
     }
 
     pub(crate) fn hash_self(&self) -> u64 {
-        let mut hasher = FnvHasher::default();
-
-        hasher.write(&self.meta_page.to_be_bytes());
-        hasher.write(&self.magic.to_be_bytes());
-        hasher.write(&self.version.to_be_bytes());
-        hasher.write(&self.pagesize.to_be_bytes());
-        hasher.write(&self.root.root_page.to_be_bytes());
-        hasher.write(&self.root.next_int.to_be_bytes());
-        hasher.write(&self.num_pages.to_be_bytes());
-        hasher.write(&self.freelist_page.to_be_bytes());
-        hasher.write(&self.tx_id.to_be_bytes());
-
-        hasher.finish()
+        let mut hash = FNV_OFFSET_BASIS;
+        hash = fnv1a(hash, &self.meta_page.to_be_bytes());
+        hash = fnv1a(hash, &self.magic.to_be_bytes());
+        hash = fnv1a(hash, &self.version.to_be_bytes());
+        hash = fnv1a(hash, &self.pagesize.to_be_bytes());
+        hash = fnv1a(hash, &self.root.root_page.to_be_bytes());
+        hash = fnv1a(hash, &self.root.next_int.to_be_bytes());
+        hash = fnv1a(hash, &self.num_pages.to_be_bytes());
+        hash = fnv1a(hash, &self.freelist_page.to_be_bytes());
+        fnv1a(hash, &self.tx_id.to_be_bytes())
     }
+}
+
+fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 #[cfg(test)]

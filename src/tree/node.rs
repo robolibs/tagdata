@@ -557,7 +557,7 @@ mod test {
             // Insert six nodes, each the size of a page.
             for key in ["a", "b", "c", "d", "e", "f"] {
                 let value = rand_bytes(512);
-                b.put(key, value.clone())?;
+                b.put(key, value.to_vec())?;
                 data.insert(key, value);
             }
             {
