@@ -1,9 +1,9 @@
 use std::fs;
 
-use inspace::{DB, Error};
+use tagdata::{DB, Error};
 
 fn main() -> Result<(), Error> {
-    let path = std::env::temp_dir().join("inspace-example.db");
+    let path = std::env::temp_dir().join("tagdata-example.db");
     let _ = fs::remove_file(&path);
     let db = DB::open(&path)?;
 

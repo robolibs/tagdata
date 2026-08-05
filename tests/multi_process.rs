@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use inspace::{DB, Error};
+use tagdata::{DB, Error};
 
 mod common;
 
@@ -18,9 +18,9 @@ fn reader_keeps_snapshot_while_another_process_commits() -> Result<(), Error> {
     let mut reader = Command::new(std::env::current_exe()?)
         .arg("--exact")
         .arg("snapshot_reader_child")
-        .env("INSPACE_MP_DB", &file.path)
-        .env("INSPACE_MP_READY", &ready)
-        .env("INSPACE_MP_RELEASE", &release)
+        .env("TAGDATA_MP_DB", &file.path)
+        .env("TAGDATA_MP_READY", &ready)
+        .env("TAGDATA_MP_RELEASE", &release)
         .spawn()?;
     wait_for(&ready)?;
 
@@ -43,11 +43,11 @@ fn reader_keeps_snapshot_while_another_process_commits() -> Result<(), Error> {
 
 #[test]
 fn snapshot_reader_child() -> Result<(), Error> {
-    let Ok(path) = std::env::var("INSPACE_MP_DB") else {
+    let Ok(path) = std::env::var("TAGDATA_MP_DB") else {
         return Ok(());
     };
-    let ready = PathBuf::from(std::env::var("INSPACE_MP_READY").unwrap());
-    let release = PathBuf::from(std::env::var("INSPACE_MP_RELEASE").unwrap());
+    let ready = PathBuf::from(std::env::var("TAGDATA_MP_READY").unwrap());
+    let release = PathBuf::from(std::env::var("TAGDATA_MP_RELEASE").unwrap());
     let db = DB::open(path)?;
 
     let tx = db.tx(false)?;
@@ -79,8 +79,8 @@ fn competing_process_writers_do_not_lose_updates() -> Result<(), Error> {
             Command::new(&executable)
                 .arg("--exact")
                 .arg("writer_child")
-                .env("INSPACE_MP_WRITE_DB", &file.path)
-                .env("INSPACE_MP_WRITE_KEY", format!("writer-{index}"))
+                .env("TAGDATA_MP_WRITE_DB", &file.path)
+                .env("TAGDATA_MP_WRITE_KEY", format!("writer-{index}"))
                 .spawn()?,
         );
     }
@@ -100,10 +100,10 @@ fn competing_process_writers_do_not_lose_updates() -> Result<(), Error> {
 
 #[test]
 fn writer_child() -> Result<(), Error> {
-    let Ok(path) = std::env::var("INSPACE_MP_WRITE_DB") else {
+    let Ok(path) = std::env::var("TAGDATA_MP_WRITE_DB") else {
         return Ok(());
     };
-    let key = std::env::var("INSPACE_MP_WRITE_KEY").unwrap();
+    let key = std::env::var("TAGDATA_MP_WRITE_KEY").unwrap();
     let db = DB::open(path)?;
     let tx = db.tx(true)?;
     tx.get_bucket("data")?.put(key, "committed")?;
@@ -118,8 +118,8 @@ fn crashed_reader_registration_is_reclaimed() -> Result<(), Error> {
     let status = Command::new(std::env::current_exe()?)
         .arg("--exact")
         .arg("crashed_reader_child")
-        .env("INSPACE_MP_CRASH_DB", &file.path)
-        .env("INSPACE_MP_CRASH_READY", &ready)
+        .env("TAGDATA_MP_CRASH_DB", &file.path)
+        .env("TAGDATA_MP_CRASH_READY", &ready)
         .status()?;
     assert!(!status.success());
 
@@ -134,10 +134,10 @@ fn crashed_reader_registration_is_reclaimed() -> Result<(), Error> {
 
 #[test]
 fn crashed_reader_child() -> Result<(), Error> {
-    let Ok(path) = std::env::var("INSPACE_MP_CRASH_DB") else {
+    let Ok(path) = std::env::var("TAGDATA_MP_CRASH_DB") else {
         return Ok(());
     };
-    let ready = std::env::var("INSPACE_MP_CRASH_READY").unwrap();
+    let ready = std::env::var("TAGDATA_MP_CRASH_READY").unwrap();
     let db = DB::open(path)?;
     let _tx = db.tx(false)?;
     std::fs::write(ready, b"registered")?;
@@ -149,7 +149,7 @@ fn stale_registration_with_reused_pid_is_ignored() -> Result<(), Error> {
     let file = common::RandomFile::new();
     initialize(&file)?;
     let mut sidecar = file.path.as_os_str().to_owned();
-    sidecar.push(".inspace");
+    sidecar.push(".tagdata");
     let stale = PathBuf::from(sidecar).join("readers").join(format!(
         "reader-00000000000000000000-{}-0-0",
         std::process::id()
@@ -175,7 +175,7 @@ fn rapid_process_open_and_close_cycles_remain_consistent() -> Result<(), Error> 
             Command::new(&executable)
                 .arg("--exact")
                 .arg("rapid_open_child")
-                .env("INSPACE_MP_RAPID_DB", &file.path)
+                .env("TAGDATA_MP_RAPID_DB", &file.path)
                 .spawn()?,
         );
     }
@@ -187,7 +187,7 @@ fn rapid_process_open_and_close_cycles_remain_consistent() -> Result<(), Error> 
 
 #[test]
 fn rapid_open_child() -> Result<(), Error> {
-    let Ok(path) = std::env::var("INSPACE_MP_RAPID_DB") else {
+    let Ok(path) = std::env::var("TAGDATA_MP_RAPID_DB") else {
         return Ok(());
     };
     for _ in 0..30 {

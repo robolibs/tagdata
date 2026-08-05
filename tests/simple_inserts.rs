@@ -1,5 +1,5 @@
-use inspace::{Bucket, DB, Data, Error, OpenOptions};
 use rand::prelude::*;
+use tagdata::{Bucket, DB, Data, Error, OpenOptions};
 
 mod common;
 

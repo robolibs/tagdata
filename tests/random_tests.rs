@@ -1,5 +1,5 @@
-use inspace::Error;
 use page_size::get as get_page_size;
+use tagdata::Error;
 
 mod common;
 

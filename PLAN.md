@@ -1,4 +1,4 @@
-# Inspace Read-Performance Merge Plan
+# Tagdata Read-Performance Merge Plan
 
 ## Status
 
@@ -70,15 +70,15 @@ that fetched every cursor result through another B+tree lookup.
 Run the baseline and candidate on the same host with:
 
 ```sh
-INSPACE_BENCH_ITEMS=100000 \
-INSPACE_BENCH_READS=500000 \
-INSPACE_BENCH_SHORT_READS=500 \
-INSPACE_BENCH_REOPEN_READS=10000 \
-INSPACE_BENCH_SAMPLES=9 \
+TAGDATA_BENCH_ITEMS=100000 \
+TAGDATA_BENCH_READS=500000 \
+TAGDATA_BENCH_SHORT_READS=500 \
+TAGDATA_BENCH_REOPEN_READS=10000 \
+TAGDATA_BENCH_SAMPLES=9 \
 make benchmark-compare
 
-INSPACE_BENCH_ITEMS=100000 \
-INSPACE_BENCH_SAMPLES=9 \
+TAGDATA_BENCH_ITEMS=100000 \
+TAGDATA_BENCH_SAMPLES=9 \
 make benchmark-typed
 ```
 
@@ -107,7 +107,7 @@ make benchmark-typed
 - Public APIs and returned bytes remain unchanged.
 
 The final curated benchmark improved point-read throughput by approximately
-17-27% over the recorded baseline. In the same run, Inspace was approximately
+17-27% over the recorded baseline. In the same run, Tagdata was approximately
 17-26% faster than jammdb for hot point reads in one reused transaction.
 
 ## Phase 3: Direct typed cursor scans
@@ -175,13 +175,13 @@ Run:
 ```sh
 make fmt
 make verify
-INSPACE_BENCH_ITEMS=100000 \
-INSPACE_BENCH_READS=500000 \
-INSPACE_BENCH_SHORT_READS=500 \
-INSPACE_BENCH_REOPEN_READS=10000 \
-INSPACE_BENCH_SAMPLES=9 \
+TAGDATA_BENCH_ITEMS=100000 \
+TAGDATA_BENCH_READS=500000 \
+TAGDATA_BENCH_SHORT_READS=500 \
+TAGDATA_BENCH_REOPEN_READS=10000 \
+TAGDATA_BENCH_SAMPLES=9 \
 make benchmark-compare
-INSPACE_BENCH_ITEMS=100000 INSPACE_BENCH_SAMPLES=9 make benchmark-typed
+TAGDATA_BENCH_ITEMS=100000 TAGDATA_BENCH_SAMPLES=9 make benchmark-typed
 ```
 
 Confirm:
@@ -264,7 +264,7 @@ Compared with `main` at `a6d1b6b` on the same Linux host:
   to 8,584 bytes (99.90%). Updating all 10,000 records reduced peak heap growth
   from 4,014,184 to 3,235,960 bytes (19.39%) and allocation calls from 65,910
   to 31,032 (52.92%);
-- in a nine-sample, 128-byte-value comparison, absolute Inspace throughput was
+- in a nine-sample, 128-byte-value comparison, absolute Tagdata throughput was
   within normal benchmark variation or better: batched writes +5.76%, hot point
   reads +3.97%, one-lookup transactions -0.09%, overlapping snapshots +1.05%,
   and ordered scans +10.64%. Reopen plus 10,000 point reads improved from

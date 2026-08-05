@@ -12,10 +12,10 @@ use crate::{DB, Result};
 const MAX_CHANGES: usize = 4096;
 #[cfg(feature = "changefeed")]
 const MAX_CHANGE_BYTES: usize = 4 * 1024 * 1024;
-pub(crate) const TTL_BUCKET: &[u8] = b"\0inspace.ttl.lookup";
-pub(crate) const TTL_DEADLINES_BUCKET: &[u8] = b"\0inspace.ttl.deadlines";
+pub(crate) const TTL_BUCKET: &[u8] = b"\0tagdata.ttl.lookup";
+pub(crate) const TTL_DEADLINES_BUCKET: &[u8] = b"\0tagdata.ttl.deadlines";
 #[cfg(feature = "changefeed")]
-pub(crate) const JOURNAL_BUCKET: &[u8] = b"\0inspace.journal";
+pub(crate) const JOURNAL_BUCKET: &[u8] = b"\0tagdata.journal";
 
 #[cfg(feature = "changefeed")]
 #[derive(Clone, Debug, Eq, PartialEq)]

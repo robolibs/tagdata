@@ -1,4 +1,4 @@
-use inspace::{Bucket, Data, Error, OpenOptions};
+use tagdata::{Bucket, Data, Error, OpenOptions};
 
 mod common;
 

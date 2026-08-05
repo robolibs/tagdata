@@ -2,7 +2,7 @@
 
 /// // Make sure a tx cannot outlife a db.
 /// ```compile_fail
-/// use inspace::{DB, Tx, Error};
+/// use tagdata::{DB, Tx, Error};
 ///
 /// fn main() -> Result<(), Error> {
 ///     let tx: Tx;
@@ -25,7 +25,7 @@ struct TxLifetime();
 
 /// // Make sure a bucket cannot outlife a tx.
 /// ```compile_fail
-/// use inspace::{DB, Bucket, Error};
+/// use tagdata::{DB, Bucket, Error};
 ///
 /// fn main() -> Result<(), Error> {
 ///     // open a new database file
@@ -48,7 +48,7 @@ struct BucketLifetime();
 
 /// // Make sure a kv-pair cannot outlive a tx.
 /// ```compile_fail
-/// use inspace::{DB, KVPair, Error};
+/// use tagdata::{DB, KVPair, Error};
 ///
 /// fn main() -> Result<(), Error> {
 ///     // open a new database file

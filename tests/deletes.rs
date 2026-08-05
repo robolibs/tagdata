@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
-use inspace::{Error, OpenOptions};
 use rand::prelude::*;
+use tagdata::{Error, OpenOptions};
 
 mod common;
 

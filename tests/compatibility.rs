@@ -1,4 +1,4 @@
-use inspace::{DB, Error, FORMAT_VERSION, FormatInfo, OpenOptions};
+use tagdata::{DB, Error, FORMAT_VERSION, FormatInfo, OpenOptions};
 
 mod common;
 

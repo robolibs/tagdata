@@ -5,7 +5,7 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
-use inspace::{ChangeOperation, DB, Error, WatchError, WatchFilter};
+use tagdata::{ChangeOperation, DB, Error, WatchError, WatchFilter};
 
 mod common;
 

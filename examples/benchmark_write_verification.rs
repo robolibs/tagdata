@@ -4,11 +4,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use inspace::{Error, OpenOptions, WriteVerification};
+use tagdata::{Error, OpenOptions, WriteVerification};
 
 fn main() -> Result<(), Error> {
-    let items = env_u64("INSPACE_BENCH_ITEMS", 10_000);
-    let samples = env_u64("INSPACE_BENCH_SAMPLES", 5) as usize;
+    let items = env_u64("TAGDATA_BENCH_ITEMS", 10_000);
+    let samples = env_u64("TAGDATA_BENCH_SAMPLES", 5) as usize;
     let mut update_counts = vec![1, 100, items];
     update_counts.sort_unstable();
     update_counts.dedup();
@@ -36,7 +36,7 @@ fn measure(items: u64, updates: u64, samples: usize) -> Result<[Duration; 3], Er
             let policy_index = (sample + step) % policies.len();
             let policy = policies[policy_index];
             let path = std::env::temp_dir().join(format!(
-                "inspace-write-verification-{}-{policy:?}-{updates}-{sample}.db",
+                "tagdata-write-verification-{}-{policy:?}-{updates}-{sample}.db",
                 std::process::id()
             ));
             cleanup(&path);
@@ -90,6 +90,6 @@ fn env_u64(name: &str, default: u64) -> u64 {
 fn cleanup(path: &Path) {
     let _ = fs::remove_file(path);
     let mut sidecar = path.as_os_str().to_owned();
-    sidecar.push(".inspace");
+    sidecar.push(".tagdata");
     let _ = fs::remove_dir_all(sidecar);
 }

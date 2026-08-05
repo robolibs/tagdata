@@ -5,7 +5,7 @@ use std::{fs::File, io::Write};
 #[cfg(feature = "test-hooks")]
 use std::process::Command;
 
-use inspace::{DB, Error, OpenOptions};
+use tagdata::{DB, Error, OpenOptions};
 
 mod common;
 
@@ -134,9 +134,9 @@ fn interrupted_backup_never_publishes_a_partial_destination() -> Result<(), Erro
     let status = Command::new(std::env::current_exe()?)
         .arg("--exact")
         .arg("backup_abort_child")
-        .env("INSPACE_BACKUP_SOURCE", &source.path)
-        .env("INSPACE_BACKUP_DESTINATION", &destination.path)
-        .env("INSPACE_FAILPOINT", "backup-before-rename")
+        .env("TAGDATA_BACKUP_SOURCE", &source.path)
+        .env("TAGDATA_BACKUP_DESTINATION", &destination.path)
+        .env("TAGDATA_FAILPOINT", "backup-before-rename")
         .status()?;
     assert!(!status.success());
     assert!(!destination.path.exists());
@@ -148,10 +148,10 @@ fn interrupted_backup_never_publishes_a_partial_destination() -> Result<(), Erro
 #[cfg(feature = "test-hooks")]
 #[test]
 fn backup_abort_child() -> Result<(), Error> {
-    let Ok(source) = std::env::var("INSPACE_BACKUP_SOURCE") else {
+    let Ok(source) = std::env::var("TAGDATA_BACKUP_SOURCE") else {
         return Ok(());
     };
-    let destination = std::env::var("INSPACE_BACKUP_DESTINATION").unwrap();
+    let destination = std::env::var("TAGDATA_BACKUP_DESTINATION").unwrap();
     DB::open(source)?.backup_to(destination)
 }
 

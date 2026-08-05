@@ -1,13 +1,13 @@
 use std::path::Path;
 
-use inspace::{Error, FORMAT_VERSION, OpenOptions};
+use tagdata::{Error, FORMAT_VERSION, OpenOptions};
 
 fn main() -> Result<(), Error> {
     let directory = Path::new("tests/fixtures");
     std::fs::create_dir_all(directory)?;
     let path = directory.join("current.db");
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_dir_all(format!("{}.inspace", path.display()));
+    let _ = std::fs::remove_dir_all(format!("{}.tagdata", path.display()));
     let db = OpenOptions::new().pagesize(4096).num_pages(8).open(&path)?;
     db.update(|tx| {
         let root = tx.create_bucket("fixture")?;
@@ -18,6 +18,6 @@ fn main() -> Result<(), Error> {
     })?;
     db.verify()?;
     drop(db);
-    let _ = std::fs::remove_dir_all(format!("{}.inspace", path.display()));
+    let _ = std::fs::remove_dir_all(format!("{}.tagdata", path.display()));
     Ok(())
 }

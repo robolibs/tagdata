@@ -1,6 +1,6 @@
 pub(crate) fn hit(stage: &str) {
     #[cfg(feature = "test-hooks")]
-    if std::env::var("INSPACE_FAILPOINT").as_deref() == Ok(stage) {
+    if std::env::var("TAGDATA_FAILPOINT").as_deref() == Ok(stage) {
         std::process::abort();
     }
 
@@ -13,7 +13,7 @@ pub(crate) fn corrupt_file(
     offset: u64,
 ) -> crate::Result<()> {
     #[cfg(feature = "test-hooks")]
-    if std::env::var("INSPACE_CORRUPT_STAGE").as_deref() == Ok(stage) {
+    if std::env::var("TAGDATA_CORRUPT_STAGE").as_deref() == Ok(stage) {
         use std::io::{Read, Seek, SeekFrom, Write};
 
         file.seek(SeekFrom::Start(offset))?;

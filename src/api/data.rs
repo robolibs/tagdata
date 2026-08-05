@@ -10,8 +10,8 @@ use crate::{ToBytes, bytes::Bytes, node::Leaf};
 /// # Examples
 ///
 /// ```no_run
-/// use inspace::{DB, Data};
-/// # use inspace::Error;
+/// use tagdata::{DB, Data};
+/// # use tagdata::Error;
 ///
 /// # fn main() -> Result<(), Error> {
 /// let db = DB::open("my.db")?;
@@ -78,8 +78,8 @@ impl<'b, 'tx> From<Leaf<'tx>> for Data<'b, 'tx> {
 /// # Examples
 ///
 /// ```no_run
-/// use inspace::{DB, Data};
-/// # use inspace::Error;
+/// use tagdata::{DB, Data};
+/// # use tagdata::Error;
 ///
 /// # fn main() -> Result<(), Error> {
 /// let db = DB::open("my.db")?;
@@ -138,8 +138,8 @@ impl<'b, 'tx> ToBytes<'tx> for &BucketName<'b, 'tx> {
 /// # Examples
 ///
 /// ```no_run
-/// use inspace::{DB, Data};
-/// # use inspace::Error;
+/// use tagdata::{DB, Data};
+/// # use tagdata::Error;
 ///
 /// # fn main() -> Result<(), Error> {
 /// let db = DB::open("my.db")?;

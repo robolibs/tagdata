@@ -133,7 +133,7 @@ fn temporary_stream_path() -> PathBuf {
         .unwrap_or_default()
         .as_nanos();
     std::env::temp_dir().join(format!(
-        "inspace-backup-{}-{timestamp}-{}.db",
+        "tagdata-backup-{}-{timestamp}-{}.db",
         std::process::id(),
         TEMP_NONCE.fetch_add(1, Ordering::Relaxed)
     ))

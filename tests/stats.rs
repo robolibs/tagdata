@@ -1,4 +1,4 @@
-use inspace::{DB, Error};
+use tagdata::{DB, Error};
 
 mod common;
 

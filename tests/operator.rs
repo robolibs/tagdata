@@ -5,7 +5,7 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
 };
 
-use inspace::{DB, Error, OpenOptions};
+use tagdata::{DB, Error, OpenOptions};
 
 mod common;
 

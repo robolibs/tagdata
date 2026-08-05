@@ -1,6 +1,6 @@
 use std::{process::Command, time::Duration};
 
-use inspace::{DB, Error, OpenOptions};
+use tagdata::{DB, Error, OpenOptions};
 
 mod common;
 
@@ -60,13 +60,13 @@ fn separate_processes_can_hold_read_only_handles() -> Result<(), Error> {
     let mut first = Command::new(&executable)
         .arg("--exact")
         .arg("read_only_child")
-        .env("INSPACE_READ_ONLY_DB", &file.path)
+        .env("TAGDATA_READ_ONLY_DB", &file.path)
         .spawn()?;
     std::thread::sleep(Duration::from_millis(50));
     let mut second = Command::new(&executable)
         .arg("--exact")
         .arg("read_only_child")
-        .env("INSPACE_READ_ONLY_DB", &file.path)
+        .env("TAGDATA_READ_ONLY_DB", &file.path)
         .spawn()?;
 
     assert!(first.wait()?.success());
@@ -83,7 +83,7 @@ fn read_only_handle_blocks_a_writer_until_release() -> Result<(), Error> {
     let mut writer = Command::new(std::env::current_exe()?)
         .arg("--exact")
         .arg("write_open_child")
-        .env("INSPACE_WRITE_DB", &file.path)
+        .env("TAGDATA_WRITE_DB", &file.path)
         .spawn()?;
     std::thread::sleep(Duration::from_millis(150));
     assert!(writer.try_wait()?.is_none());
@@ -95,7 +95,7 @@ fn read_only_handle_blocks_a_writer_until_release() -> Result<(), Error> {
 
 #[test]
 fn read_only_child() -> Result<(), Error> {
-    let Ok(path) = std::env::var("INSPACE_READ_ONLY_DB") else {
+    let Ok(path) = std::env::var("TAGDATA_READ_ONLY_DB") else {
         return Ok(());
     };
     let db = OpenOptions::new().read_only().open(path)?;
@@ -108,7 +108,7 @@ fn read_only_child() -> Result<(), Error> {
 
 #[test]
 fn write_open_child() -> Result<(), Error> {
-    let Ok(path) = std::env::var("INSPACE_WRITE_DB") else {
+    let Ok(path) = std::env::var("TAGDATA_WRITE_DB") else {
         return Ok(());
     };
     let db = DB::open(path)?;

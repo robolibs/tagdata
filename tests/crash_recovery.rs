@@ -2,7 +2,7 @@
 
 use std::process::Command;
 
-use inspace::{DB, Error};
+use tagdata::{DB, Error};
 
 mod common;
 
@@ -32,8 +32,8 @@ fn interrupted_commits_recover_complete_snapshots() -> Result<(), Error> {
             .arg("--exact")
             .arg("crash_commit_child")
             .arg("--nocapture")
-            .env("INSPACE_CRASH_DB", &file.path)
-            .env("INSPACE_FAILPOINT", stage)
+            .env("TAGDATA_CRASH_DB", &file.path)
+            .env("TAGDATA_FAILPOINT", stage)
             .status()?;
         assert!(!status.success(), "failpoint {stage} did not terminate");
 
@@ -68,7 +68,7 @@ fn interrupted_commits_recover_complete_snapshots() -> Result<(), Error> {
 
 #[test]
 fn crash_commit_child() -> Result<(), Error> {
-    let Ok(path) = std::env::var("INSPACE_CRASH_DB") else {
+    let Ok(path) = std::env::var("TAGDATA_CRASH_DB") else {
         return Ok(());
     };
 
@@ -91,8 +91,8 @@ fn readback_rejects_corrupted_writes_before_publication() -> Result<(), Error> {
             .arg("--exact")
             .arg("corrupt_commit_child")
             .arg("--nocapture")
-            .env("INSPACE_CORRUPT_DB", &file.path)
-            .env("INSPACE_CORRUPT_STAGE", stage)
+            .env("TAGDATA_CORRUPT_DB", &file.path)
+            .env("TAGDATA_CORRUPT_STAGE", stage)
             .status()?;
         assert!(status.success(), "corruption child failed at {stage}");
 
@@ -109,7 +109,7 @@ fn readback_rejects_corrupted_writes_before_publication() -> Result<(), Error> {
 
 #[test]
 fn corrupt_commit_child() -> Result<(), Error> {
-    let Ok(path) = std::env::var("INSPACE_CORRUPT_DB") else {
+    let Ok(path) = std::env::var("TAGDATA_CORRUPT_DB") else {
         return Ok(());
     };
 

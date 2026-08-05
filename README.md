@@ -1,6 +1,6 @@
-# inspace
+# tagdata
 
-`inspace` is an embedded, single-data-file, memory-mapped key/value database for Rust.
+`tagdata` is an embedded, single-data-file, memory-mapped key/value database for Rust.
 
 See [acknowledgments](ACKOLEGMENT.md) for prior work that informed the project.
 
@@ -27,7 +27,7 @@ See [acknowledgments](ACKOLEGMENT.md) for prior work that informed the project.
   and overflow block and exposes full offline verification.
 
 ```rust
-use inspace::{DB, Error};
+use tagdata::{DB, Error};
 
 fn main() -> Result<(), Error> {
     let db = DB::open("my.db")?;
@@ -65,7 +65,7 @@ The raw byte API remains the default and adds no serialization dependency.
 Enable `typed` for `KeyCodec`, `ValueCodec`, and `TypedBucket<K, V, C>`:
 
 ```toml
-inspace = { version = "0.1", features = ["typed"] }
+tagdata = { version = "0.1", features = ["typed"] }
 ```
 
 The built-in unsigned, sign-bit-adjusted signed, UTF-8 string, byte-vector, and
@@ -118,9 +118,9 @@ that need replay can opt into a journal stored atomically inside the user
 transaction:
 
 ```rust,no_run
-use inspace::{DB, JournalConfig};
+use tagdata::{DB, JournalConfig};
 
-# fn example() -> Result<(), inspace::Error> {
+# fn example() -> Result<(), tagdata::Error> {
 let db = DB::open("my.db")?;
 db.enable_journal(JournalConfig { max_transactions: 10_000 })?;
 let replay = db.replay_journal(0, 100, None)?;
@@ -166,12 +166,12 @@ barriers without readback. `WriteVerification::Full` adds a complete structural
 walk before metadata publication. For example:
 
 ```rust
-use inspace::{OpenOptions, WriteVerification};
+use tagdata::{OpenOptions, WriteVerification};
 
 let db = OpenOptions::new()
     .write_verification(WriteVerification::Full)
     .open("important.db")?;
-# Ok::<(), inspace::Error>(())
+# Ok::<(), tagdata::Error>(())
 ```
 
 Readback verifies the bytes visible through the operating system after sync; it
@@ -180,7 +180,7 @@ does not replace drive power-loss protection or end-to-end storage hardware.
 Use `OpenOptions::new().read_only()` for a handle that never creates, resizes, or
 writes the database. A read-only handle rejects writable transactions.
 
-Writable handles coordinate through a sibling `.inspace` directory. Reader
+Writable handles coordinate through a sibling `.tagdata` directory. Reader
 registrations are removed automatically, including stale registrations left by
 terminated processes. Keep that directory beside the database while it is live.
 
@@ -189,7 +189,7 @@ With `maintenance`, use `DB::backup_to` for an atomically published snapshot,
 live data into a smaller file. Maintenance operations never replace the source
 database.
 
-Inspace has one current on-disk format. Each allocated page block ends with a
+Tagdata has one current on-disk format. Each allocated page block ends with a
 SHA3-256 checksum covering its header and payload. Page bounds, element counts,
 offsets, overflow spans, tree ordering, and reachability are checked by
 `DB::verify()`. `OpenOptions::verify_on_open(true)` performs that full walk while
@@ -215,21 +215,21 @@ SHA3-256 checksum with FNV-1a-64 over the same file. SHA3-256 is used on disk fo
 substantially stronger corruption detection; the benchmark keeps that cost
 visible rather than silently choosing the faster non-cryptographic hash.
 
-`make benchmark-compare` compares Inspace with jammdb 0.11.0 using hot point
+`make benchmark-compare` compares Tagdata with jammdb 0.11.0 using hot point
 reads, one-lookup transactions, overlapping snapshots, ordered scans, reopen
 reads, three value sizes, and the same batched writes. It alternates execution
 order and reports medians across independent database files. The workload is
-controlled by `INSPACE_BENCH_ITEMS`, `INSPACE_BENCH_READS`,
-`INSPACE_BENCH_SHORT_READS`, `INSPACE_BENCH_REOPEN_READS`,
-`INSPACE_BENCH_SAMPLES`, and comma-separated `INSPACE_BENCH_VALUE_BYTES`.
+controlled by `TAGDATA_BENCH_ITEMS`, `TAGDATA_BENCH_READS`,
+`TAGDATA_BENCH_SHORT_READS`, `TAGDATA_BENCH_REOPEN_READS`,
+`TAGDATA_BENCH_SAMPLES`, and comma-separated `TAGDATA_BENCH_VALUE_BYTES`.
 
 `make benchmark-write-verification` reports median commit latency for Standard,
-ReadBack, and Full policies. `INSPACE_BENCH_ITEMS` controls database size and
-`INSPACE_BENCH_SAMPLES` controls repetitions.
+ReadBack, and Full policies. `TAGDATA_BENCH_ITEMS` controls database size and
+`TAGDATA_BENCH_SAMPLES` controls repetitions.
 
 `make operator-size` builds the operator with size optimization, whole-program
 LTO, one codegen unit, abort-on-panic, and stripped symbols. Applications that
-embed Inspace must define equivalent profile settings in their own workspace;
+embed Tagdata must define equivalent profile settings in their own workspace;
 Cargo ignores release profiles declared by dependencies.
 
 `make benchmark-memory` reports peak heap growth and allocation calls while

@@ -148,7 +148,7 @@ impl Drop for ReaderRegistration {
 
 pub(crate) fn sidecar_path(database: &Path) -> PathBuf {
     let mut path: OsString = database.as_os_str().to_owned();
-    path.push(".inspace");
+    path.push(".tagdata");
     PathBuf::from(path)
 }
 

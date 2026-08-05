@@ -3,7 +3,7 @@ use std::{
     time::Duration,
 };
 
-use inspace::{DB, Error, TransactionError};
+use tagdata::{DB, Error, TransactionError};
 
 mod common;
 

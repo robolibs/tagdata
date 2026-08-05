@@ -6,8 +6,8 @@ use std::{
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
-use inspace::{Bucket, Data, Error, OpenOptions, Tx};
 use rand::{distributions::Alphanumeric, prelude::*};
+use tagdata::{Bucket, Data, Error, OpenOptions, Tx};
 
 pub struct SizeParams {
     pub min: usize,

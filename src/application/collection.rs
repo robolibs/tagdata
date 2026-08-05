@@ -36,7 +36,7 @@ pub struct BulkLoadResult {
 /// It intentionally exposes no mutating methods.
 ///
 /// ```compile_fail
-/// use inspace::{ReadCollection, StringCodec, TypedCodec, U64Codec};
+/// use tagdata::{ReadCollection, StringCodec, TypedCodec, U64Codec};
 ///
 /// fn cannot_write(
 ///     users: &ReadCollection<'_, '_, u64, String, TypedCodec<U64Codec, StringCodec>>,
@@ -48,7 +48,7 @@ pub struct BulkLoadResult {
 /// Collection handles cannot outlive their transaction:
 ///
 /// ```compile_fail
-/// use inspace::{CollectionDef, DB, ReadCollection, StringCodec, TypedCodec, U64Codec};
+/// use tagdata::{CollectionDef, DB, ReadCollection, StringCodec, TypedCodec, U64Codec};
 ///
 /// fn leak(db: &DB) -> ReadCollection<'static, 'static, u64, String, TypedCodec<U64Codec, StringCodec>> {
 ///     let tx = db.read_tx().unwrap();

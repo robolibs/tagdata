@@ -54,10 +54,10 @@ fixtures:
 	@$(CARGO) run --example fixture_gen
 
 operator:
-	@$(CARGO) build --release --features operator --bin inspace
+	@$(CARGO) build --release --features operator --bin tagdata
 
 operator-size:
-	@$(CARGO) build --profile size --features operator --bin inspace
+	@$(CARGO) build --profile size --features operator --bin tagdata
 
 package:
 	@$(CARGO) package --locked
@@ -118,7 +118,7 @@ help:
 	@echo "  compile      Clean and rebuild"
 	@echo "  run          Run a development example"
 	@echo "  benchmark    Run the release-mode smoke benchmark"
-	@echo "  benchmark-compare  Compare Inspace with jammdb 0.11.0"
+	@echo "  benchmark-compare  Compare Tagdata with jammdb 0.11.0"
 	@echo "  benchmark-memory   Measure reopen and write-transaction heap allocations"
 	@echo "  benchmark-typed    Compare direct typed scans with the previous lookup path"
 	@echo "  benchmark-write-verification  Compare write-safety policies"

@@ -1,12 +1,12 @@
 //! # Just Another Memory Mapped Database
 //!
-//! Inspace is an embedded, single-file database that stores key/value pairs as bytes.
+//! Tagdata is an embedded, single-file database that stores key/value pairs as bytes.
 //!
 //! It started life as a Rust port of [Ben Johnson's](https://twitter.com/benbjohnson) [BoltDB](https://github.com/boltdb/bolt),
 //! which was inspired by [Howard Chu's](https://twitter.com/hyc_symas) [LMDB](http://symas.com/mdb/),
 //! so please check out both of these awesome projects!
 //!
-//! Inspace offers
+//! Tagdata offers
 //! [ACID](https://en.wikipedia.org/wiki/ACID) compliance,
 //! [serializable](https://en.wikipedia.org/wiki/Serializability) and
 //! [isolated](https://en.wikipedia.org/wiki/Isolation_(database_systems)) transactions,
@@ -14,7 +14,7 @@
 //! [single level](https://en.wikipedia.org/wiki/Single-level_store) [B+ tree](https://en.wikipedia.org/wiki/B%2B_tree)
 //! so random and sequential reads are very fast. The underlying file is [memory mapped](https://en.wikipedia.org/wiki/Memory-mapped_file), so reads require no additional memory allocation.
 //!
-//! Inspace has a small exported API. It stores data in collections called [`Buckets`](struct.Bucket.html),
+//! Tagdata has a small exported API. It stores data in collections called [`Buckets`](struct.Bucket.html),
 //! and each bucket can contain unique keys mapped to byte values or nested buckets.
 //! There are also more examples in the docs, be sure to check out
 //! * Using a [`Cursor`] to iterate over the data in a bucket
@@ -26,7 +26,7 @@
 //!
 //! ## Simple put and get
 //! ```no_run
-//! use inspace::{DB, Data, Error};
+//! use tagdata::{DB, Data, Error};
 //!
 //! fn main() -> Result<(), Error> {
 //! {
@@ -62,7 +62,7 @@
 //!
 //! ## Storing structs
 //! ```no_run
-//! use inspace::{DB, Data, Error};
+//! use tagdata::{DB, Data, Error};
 //! use serde::{Deserialize, Serialize};
 //! // use rmps crate to serialize structs using the MessagePack format
 //! use rmp_serde::{Deserializer, Serializer};
@@ -206,7 +206,7 @@ mod testutil {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.path);
             let mut sidecar = self.path.as_os_str().to_owned();
-            sidecar.push(".inspace");
+            sidecar.push(".tagdata");
             let _ = std::fs::remove_dir_all(std::path::PathBuf::from(sidecar));
         }
     }

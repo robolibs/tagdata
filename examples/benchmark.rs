@@ -2,13 +2,13 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use std::{fs, hash::Hasher, hint::black_box};
 
 use fnv::FnvHasher;
-use inspace::{DB, Error, OpenOptions};
 use sha3::{Digest, Sha3_256};
+use tagdata::{DB, Error, OpenOptions};
 
 const ITEMS: u64 = 100_000;
 
 fn main() -> Result<(), Error> {
-    let path = std::env::temp_dir().join("inspace-benchmark.db");
+    let path = std::env::temp_dir().join("tagdata-benchmark.db");
     let _ = fs::remove_file(&path);
     let db = DB::open(&path)?;
 
@@ -67,14 +67,14 @@ fn main() -> Result<(), Error> {
 
     drop(db);
     fs::remove_file(path)?;
-    let _ = fs::remove_dir_all(std::env::temp_dir().join("inspace-benchmark.db.inspace"));
+    let _ = fs::remove_dir_all(std::env::temp_dir().join("tagdata-benchmark.db.tagdata"));
     Ok(())
 }
 
 fn benchmark_reclamation() -> Result<(), Error> {
     const CHURN_KEYS: u64 = 2_000;
     const ROUNDS: u8 = 4;
-    let path = std::env::temp_dir().join("inspace-reclamation-benchmark.db");
+    let path = std::env::temp_dir().join("tagdata-reclamation-benchmark.db");
     let _ = fs::remove_file(&path);
     let db = OpenOptions::new()
         .num_pages(4)
@@ -137,6 +137,6 @@ fn benchmark_reclamation() -> Result<(), Error> {
 
     drop(db);
     fs::remove_file(&path)?;
-    let _ = fs::remove_dir_all(path.with_extension("db.inspace"));
+    let _ = fs::remove_dir_all(path.with_extension("db.tagdata"));
     Ok(())
 }

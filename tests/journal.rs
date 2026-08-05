@@ -1,6 +1,6 @@
 #![cfg(feature = "changefeed")]
 
-use inspace::{ChangeOperation, DB, Error, JournalConfig, WatchFilter};
+use tagdata::{ChangeOperation, DB, Error, JournalConfig, WatchFilter};
 
 mod common;
 

@@ -6,13 +6,13 @@ Accepted.
 
 ## Required behavior
 
-Inspace permits many snapshot readers and one writer across processes. Existing
+Tagdata permits many snapshot readers and one writer across processes. Existing
 readers may continue while a writer publishes a new snapshot. A page visible to
 any registered reader cannot be reused.
 
 ## Coordination layout
 
-For `data.db`, writable handles use a `data.db.inspace` directory:
+For `data.db`, writable handles use a `data.db.tagdata` directory:
 
 ```text
 gate.lock

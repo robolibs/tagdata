@@ -49,8 +49,8 @@ mod tests;
 /// # Examples
 ///
 /// ```no_run
-/// use inspace::{DB, Data};
-/// # use inspace::Error;
+/// use tagdata::{DB, Data};
+/// # use tagdata::Error;
 ///
 /// # fn main() -> Result<(), Error> {
 /// let db = DB::open("my.db")?;
@@ -113,8 +113,8 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
     /// # Examples
     ///
     /// ```no_run
-    /// use inspace::{DB};
-    /// # use inspace::Error;
+    /// use tagdata::{DB};
+    /// # use tagdata::Error;
     ///
     /// # fn main() -> Result<(), Error> {
     /// let db = DB::open("my.db")?;
@@ -182,8 +182,8 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
     /// # Examples
     ///
     /// ```no_run
-    /// use inspace::{DB};
-    /// # use inspace::Error;
+    /// use tagdata::{DB};
+    /// # use tagdata::Error;
     ///
     /// # fn main() -> Result<(), Error> {
     /// let db = DB::open("my.db")?;
@@ -226,8 +226,8 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
     /// # Examples
     ///
     /// ```no_run
-    /// use inspace::{DB};
-    /// # use inspace::Error;
+    /// use tagdata::{DB};
+    /// # use tagdata::Error;
     ///
     /// # fn main() -> Result<(), Error> {
     /// let db = DB::open("my.db")?;
@@ -272,8 +272,8 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
     /// # Examples
     ///
     /// ```no_run
-    /// use inspace::{DB};
-    /// # use inspace::Error;
+    /// use tagdata::{DB};
+    /// # use tagdata::Error;
     ///
     /// # fn main() -> Result<(), Error> {
     /// let db = DB::open("my.db")?;
@@ -323,8 +323,8 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
     /// # Examples
     ///
     /// ```no_run
-    /// use inspace::{DB};
-    /// # use inspace::Error;
+    /// use tagdata::{DB};
+    /// # use tagdata::Error;
     ///
     /// # fn main() -> Result<(), Error> {
     /// let db = DB::open("my.db")?;
@@ -381,8 +381,8 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
     /// # Examples
     ///
     /// ```no_run
-    /// use inspace::{DB};
-    /// # use inspace::Error;
+    /// use tagdata::{DB};
+    /// # use tagdata::Error;
     ///
     /// # fn main() -> Result<(), Error> {
     /// let db = DB::open("my.db")?;
@@ -426,8 +426,8 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
     /// # Examples
     ///
     /// ```no_run
-    /// use inspace::{DB, Data};
-    /// # use inspace::Error;
+    /// use tagdata::{DB, Data};
+    /// # use tagdata::Error;
     ///
     /// # fn main() -> Result<(), Error> {
     /// let db = DB::open("my.db")?;
@@ -463,8 +463,8 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
     /// # Examples
     ///
     /// ```no_run
-    /// use inspace::{DB};
-    /// # use inspace::Error;
+    /// use tagdata::{DB};
+    /// # use tagdata::Error;
     ///
     /// # fn main() -> Result<(), Error> {
     /// let db = DB::open("my.db")?;

@@ -3,7 +3,7 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
 };
 
-use inspace::{Error, OpenOptions};
+use tagdata::{Error, OpenOptions};
 
 mod common;
 

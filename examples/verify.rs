@@ -1,6 +1,6 @@
 use std::{env, process::ExitCode};
 
-use inspace::OpenOptions;
+use tagdata::OpenOptions;
 
 fn main() -> ExitCode {
     let mut args = env::args_os().skip(1);

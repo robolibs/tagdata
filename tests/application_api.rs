@@ -1,12 +1,12 @@
 #![cfg(feature = "typed")]
 
-use inspace::{
-    CodecError, CollectionDef, DB, OpenPolicy, StringCodec, TransactionError, TypedCodec, U64Codec,
-    WriteOptions,
-};
 use std::{
     collections::BTreeMap,
     time::{Duration, SystemTime},
+};
+use tagdata::{
+    CodecError, CollectionDef, DB, OpenPolicy, StringCodec, TransactionError, TypedCodec, U64Codec,
+    WriteOptions,
 };
 
 use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -126,7 +126,7 @@ fn collection_schema_and_open_policy_are_enforced() -> Result<(), Box<dyn std::e
     });
     assert!(matches!(
         exists,
-        Err(TransactionError::Storage(inspace::Error::BucketExists))
+        Err(TransactionError::Storage(tagdata::Error::BucketExists))
     ));
     Ok(())
 }

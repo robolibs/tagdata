@@ -16,20 +16,20 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact: "inspace-linux-amd64"
+            artifact: "tagdata-linux-amd64"
           - os: ubuntu-24.04-arm
-            artifact: "inspace-linux-arm64"
+            artifact: "tagdata-linux-arm64"
           - os: macos-15-intel
-            artifact: "inspace-macos-amd64"
+            artifact: "tagdata-macos-amd64"
           - os: macos-14
-            artifact: "inspace-macos-arm64"
+            artifact: "tagdata-macos-arm64"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Build
         run: make operator
       - name: Package
-        run: tar -czf "${{ matrix.artifact }}.tar.gz" "target/release/inspace"
+        run: tar -czf "${{ matrix.artifact }}.tar.gz" "target/release/tagdata"
       - name: Upload artifact
         uses: softprops/action-gh-release@v2
         with:

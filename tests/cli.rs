@@ -2,7 +2,7 @@
 
 use std::process::Command;
 
-use inspace::{DB, Error, FORMAT_VERSION};
+use tagdata::{DB, Error, FORMAT_VERSION};
 
 mod common;
 
@@ -42,7 +42,7 @@ fn operator_commands_emit_stable_json_and_create_outputs() -> Result<(), Error> 
 }
 
 fn command<const N: usize>(arguments: [&str; N]) -> Result<serde_json::Value, Error> {
-    let output = Command::new(env!("CARGO_BIN_EXE_inspace"))
+    let output = Command::new(env!("CARGO_BIN_EXE_tagdata"))
         .args(arguments)
         .output()?;
     assert!(

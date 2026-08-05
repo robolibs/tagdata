@@ -1,13 +1,13 @@
 [package]
-name = "inspace"
+name = "tagdata"
 version = "0.1.0"
 edition = "2024"
-description = "inspace"
+description = "tagdata"
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/robolibs/inspace"
-homepage = "https://github.com/robolibs/inspace"
-documentation = "https://docs.rs/inspace"
+repository = "https://github.com/robolibs/tagdata"
+homepage = "https://github.com/robolibs/tagdata"
+documentation = "https://docs.rs/tagdata"
 keywords = ["database", "embedded", "mmap", "key-value", "transactions"]
 categories = ["database-implementations", "data-structures"]
 rust-version = "1.89"
@@ -17,8 +17,8 @@ publish = false
 path = "src/lib.rs"
 
 [[bin]]
-name = "inspace"
-path = "src/bin/inspace.rs"
+name = "tagdata"
+path = "src/bin/tagdata.rs"
 required-features = ["operator"]
 
 [[example]]

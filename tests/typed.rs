@@ -1,6 +1,6 @@
 #![cfg(feature = "typed")]
 
-use inspace::{
+use tagdata::{
     BytesCodec, CodecError, DB, I64Codec, KeyCodec, StringCodec, StringPairCodec, TypedBucket,
     TypedCodec, U64Codec,
 };
@@ -70,8 +70,8 @@ fn assert_order<K: Clone + std::fmt::Debug + Eq, C: KeyCodec<K>>(
 #[cfg(feature = "serde-codec")]
 #[test]
 fn messagepack_values_are_opt_in() -> Result<(), Box<dyn std::error::Error>> {
-    use inspace::MessagePackCodec;
     use serde::{Deserialize, Serialize};
+    use tagdata::MessagePackCodec;
 
     #[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
     struct User {

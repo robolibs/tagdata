@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use inspace::{CollectionDef, DB, KeyCodec, TypedCodec, U64Codec, ValueCodec};
+use tagdata::{CollectionDef, DB, KeyCodec, TypedCodec, U64Codec, ValueCodec};
 
 const DEFAULT_ITEMS: u64 = 100_000;
 const DEFAULT_SAMPLES: usize = 9;
@@ -14,17 +14,17 @@ const RECORDS: CollectionDef<u64, u64, TypedCodec<U64Codec, U64Codec>> =
     CollectionDef::new("records", TypedCodec::new(U64Codec, U64Codec));
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let items = setting("INSPACE_BENCH_ITEMS", DEFAULT_ITEMS)?;
-    let samples = setting("INSPACE_BENCH_SAMPLES", DEFAULT_SAMPLES)?;
+    let items = setting("TAGDATA_BENCH_ITEMS", DEFAULT_ITEMS)?;
+    let samples = setting("TAGDATA_BENCH_SAMPLES", DEFAULT_SAMPLES)?;
     if items == 0 || samples == 0 {
         return Err("benchmark settings must be non-zero".into());
     }
 
-    let root = env::temp_dir().join(format!("inspace-typed-bench-{}", std::process::id()));
+    let root = env::temp_dir().join(format!("tagdata-typed-bench-{}", std::process::id()));
     let path = root.join("typed.db");
     fs::create_dir_all(&root)?;
     let _ = fs::remove_file(&path);
-    let _ = fs::remove_dir_all(format!("{}.inspace", path.display()));
+    let _ = fs::remove_dir_all(format!("{}.tagdata", path.display()));
     let db = DB::open(&path)?;
     let tx = db.write_tx()?;
     let records = tx.collection_mut(RECORDS)?;
@@ -48,7 +48,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let direct = median(direct);
     let legacy = median(legacy);
-    println!("Inspace typed full scan");
+    println!("Tagdata typed full scan");
     println!("items: {items}, samples: {samples}");
     print_result("direct cursor decode", items, direct);
     print_result("legacy repeated lookup", items, legacy);
@@ -64,7 +64,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn time_direct<C>(
-    records: &inspace::ReadCollection<'_, '_, u64, u64, C>,
+    records: &tagdata::ReadCollection<'_, '_, u64, u64, C>,
     expected: u64,
 ) -> Result<Duration, Box<dyn Error>>
 where
@@ -82,7 +82,7 @@ where
     Ok(started.elapsed())
 }
 
-fn time_legacy(raw: &inspace::Bucket<'_, '_>, expected: u64) -> Result<Duration, Box<dyn Error>> {
+fn time_legacy(raw: &tagdata::Bucket<'_, '_>, expected: u64) -> Result<Duration, Box<dyn Error>> {
     let codec = TypedCodec::new(U64Codec, U64Codec);
     let started = Instant::now();
     let mut visited = 0;

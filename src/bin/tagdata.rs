@@ -1,6 +1,6 @@
 use std::{env, path::Path, process::ExitCode};
 
-use inspace::{DB, FormatInfo, OpenOptions, SalvageManifest, Stats, VerifyReport};
+use tagdata::{DB, FormatInfo, OpenOptions, SalvageManifest, Stats, VerifyReport};
 
 fn main() -> ExitCode {
     match run() {
@@ -260,5 +260,5 @@ fn string(value: &str) -> String {
 }
 
 fn usage() -> &'static str {
-    "usage: inspace [--json] <info|stats|verify> <database>\n       inspace [--json] <backup|salvage> <source> <destination>\n       inspace [--json] compact <source> <destination> [page-size]"
+    "usage: tagdata [--json] <info|stats|verify> <database>\n       tagdata [--json] <backup|salvage> <source> <destination>\n       tagdata [--json] compact <source> <destination> [page-size]"
 }

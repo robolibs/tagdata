@@ -121,25 +121,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "inspace"
-version = "0.1.0"
-dependencies = [
- "bumpalo",
- "bytes",
- "fnv",
- "jammdb",
- "libc",
- "memmap2",
- "page_size",
- "rand",
- "rmp-serde",
- "serde",
- "serde_json",
- "sha3",
- "windows-sys 0.59.0",
-]
-
-[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -378,6 +359,25 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "tagdata"
+version = "0.1.0"
+dependencies = [
+ "bumpalo",
+ "bytes",
+ "fnv",
+ "jammdb",
+ "libc",
+ "memmap2",
+ "page_size",
+ "rand",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "sha3",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

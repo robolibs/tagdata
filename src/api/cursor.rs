@@ -29,8 +29,8 @@ use crate::{
 /// # Examples
 ///
 /// ```no_run
-/// use inspace::{DB, Data};
-/// # use inspace::Error;
+/// use tagdata::{DB, Data};
+/// # use tagdata::Error;
 ///
 /// # fn main() -> Result<(), Error> {
 /// let db = DB::open("my.db")?;

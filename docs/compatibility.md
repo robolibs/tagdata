@@ -3,7 +3,7 @@
 ## Language and platforms
 
 The minimum supported Rust version (MSRV) is **1.89.0**, which provides the
-standard-library file locking used by Inspace. Raising the MSRV requires a minor release while the
+standard-library file locking used by Tagdata. Raising the MSRV requires a minor release while the
 crate is below 1.0 and must be called out in the changelog.
 
 The supported platform matrix is Linux, macOS, and Windows on the architectures

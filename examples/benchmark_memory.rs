@@ -4,7 +4,7 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use inspace::{Error, OpenOptions, WriteVerification};
+use tagdata::{Error, OpenOptions, WriteVerification};
 
 struct CountingAllocator;
 
@@ -44,7 +44,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
 fn main() -> Result<(), Error> {
     const ITEMS: u64 = 10_000;
-    let path = std::env::temp_dir().join("inspace-memory-benchmark.db");
+    let path = std::env::temp_dir().join("tagdata-memory-benchmark.db");
     cleanup(&path);
     let db = OpenOptions::new()
         .write_verification(WriteVerification::Standard)
@@ -105,6 +105,6 @@ fn record_allocation(bytes: usize) {
 fn cleanup(path: &std::path::Path) {
     let _ = fs::remove_file(path);
     let mut sidecar = path.as_os_str().to_owned();
-    sidecar.push(".inspace");
+    sidecar.push(".tagdata");
     let _ = fs::remove_dir_all(sidecar);
 }

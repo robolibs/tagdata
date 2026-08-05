@@ -59,8 +59,8 @@ const DEFAULT_NUM_PAGES: usize = 32;
 /// # Examples
 ///
 /// ```no_run
-/// use inspace::{DB, OpenOptions};
-/// # use inspace::Error;
+/// use tagdata::{DB, OpenOptions};
+/// # use tagdata::Error;
 ///
 /// # fn main() -> Result<(), Error> {
 /// let db = OpenOptions::new()
@@ -320,8 +320,8 @@ impl DB {
     /// # Examples
     ///
     /// ```no_run
-    /// use inspace::{DB};
-    /// # use inspace::Error;
+    /// use tagdata::{DB};
+    /// # use tagdata::Error;
     ///
     /// # fn main() -> Result<(), Error> {
     /// let db = DB::open("my.db")?;
