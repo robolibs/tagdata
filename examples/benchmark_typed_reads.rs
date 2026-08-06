@@ -24,7 +24,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let path = root.join("typed.db");
     fs::create_dir_all(&root)?;
     let _ = fs::remove_file(&path);
-    let _ = fs::remove_dir_all(format!("{}.tagdata", path.display()));
     let db = DB::open(&path)?;
     let tx = db.write_tx()?;
     let records = tx.collection_mut(RECORDS)?;

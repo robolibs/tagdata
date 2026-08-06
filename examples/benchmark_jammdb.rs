@@ -3,7 +3,7 @@ use std::{
     error::Error,
     fs,
     hint::black_box,
-    path::{Path, PathBuf},
+    path::Path,
     time::{Duration, Instant},
 };
 
@@ -398,13 +398,6 @@ fn prepare(path: &Path) -> Result<(), Box<dyn Error>> {
 
 fn cleanup(path: &Path) {
     let _ = fs::remove_file(path);
-    let mut sidecar = PathBuf::from(path);
-    let extension = path
-        .extension()
-        .map(|extension| extension.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    sidecar.set_extension(format!("{extension}.tagdata"));
-    let _ = fs::remove_dir_all(sidecar);
 }
 
 fn median_sample(samples: Vec<Sample>) -> Sample {

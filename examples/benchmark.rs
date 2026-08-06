@@ -67,7 +67,6 @@ fn main() -> Result<(), Error> {
 
     drop(db);
     fs::remove_file(path)?;
-    let _ = fs::remove_dir_all(std::env::temp_dir().join("tagdata-benchmark.db.tagdata"));
     Ok(())
 }
 
@@ -137,6 +136,5 @@ fn benchmark_reclamation() -> Result<(), Error> {
 
     drop(db);
     fs::remove_file(&path)?;
-    let _ = fs::remove_dir_all(path.with_extension("db.tagdata"));
     Ok(())
 }

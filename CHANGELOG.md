@@ -5,6 +5,7 @@
 ### <!-- 0 -->⛰️  Features
 
 - Add recursive database and bucket merging
+- Use single-file OFD coordination
 
 ## [0.1.1] - 2026-08-05
 
@@ -86,4 +87,3 @@
 
 - Gate typed benchmark example
 - Define publication compatibility contract
-

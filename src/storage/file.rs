@@ -39,43 +39,13 @@ pub(crate) fn allocate(file: &File, len: u64) -> io::Result<()> {
     file.set_len(len)
 }
 
-#[cfg(windows)]
-pub(crate) fn allocate(file: &File, len: u64) -> io::Result<()> {
-    use std::{mem, os::windows::io::AsRawHandle};
-    use windows_sys::Win32::{
-        Foundation::HANDLE,
-        Storage::FileSystem::{
-            FILE_ALLOCATION_INFO, FileAllocationInfo, SetFileInformationByHandle,
-        },
-    };
-
-    let allocation_size = i64::try_from(len)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "file size exceeds i64"))?;
-    let mut info = FILE_ALLOCATION_INFO {
-        AllocationSize: allocation_size,
-    };
-    let result = unsafe {
-        SetFileInformationByHandle(
-            file.as_raw_handle() as HANDLE,
-            FileAllocationInfo,
-            &mut info as *mut _ as *mut _,
-            mem::size_of::<FILE_ALLOCATION_INFO>() as u32,
-        )
-    };
-    if result == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    file.set_len(len)
-}
-
 #[cfg(not(any(
     target_os = "linux",
     target_os = "android",
     target_os = "macos",
     target_os = "ios",
     target_os = "tvos",
-    target_os = "watchos",
-    windows
+    target_os = "watchos"
 )))]
 pub(crate) fn allocate(file: &File, len: u64) -> io::Result<()> {
     file.set_len(len)

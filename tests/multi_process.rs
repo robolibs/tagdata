@@ -1,6 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     process::Command,
+    thread,
     time::{Duration, Instant},
 };
 
@@ -145,22 +146,134 @@ fn crashed_reader_child() -> Result<(), Error> {
 }
 
 #[test]
-fn stale_registration_with_reused_pid_is_ignored() -> Result<(), Error> {
+fn separate_handles_keep_independent_writer_locks() -> Result<(), Error> {
     let file = common::RandomFile::new();
     initialize(&file)?;
-    let mut sidecar = file.path.as_os_str().to_owned();
-    sidecar.push(".tagdata");
-    let stale = PathBuf::from(sidecar).join("readers").join(format!(
-        "reader-00000000000000000000-{}-0-0",
-        std::process::id()
-    ));
-    std::fs::write(&stale, b"stale")?;
+
+    let first = DB::open(&file)?;
+    let second = DB::open(&file)?;
+    let writer = first.write_tx()?;
+    assert!(second.try_write_tx()?.is_none());
+    drop(writer);
+    assert!(second.try_write_tx()?.is_some());
+    Ok(())
+}
+
+#[test]
+fn closing_another_handle_keeps_reader_registered() -> Result<(), Error> {
+    let file = common::RandomFile::new();
+    initialize(&file)?;
+
+    let owner = DB::open(&file)?;
+    let other = DB::open(&file)?;
+    let reader = owner.read_tx()?;
+    drop(other);
+
+    let observer = DB::open(&file)?;
+    let stats = observer.stats()?;
+    assert_eq!(stats.active_readers, 1);
+    assert_eq!(stats.oldest_reader_tx_id, Some(1));
+    drop(reader);
+    assert_eq!(observer.stats()?.active_readers, 0);
+    Ok(())
+}
+
+#[test]
+fn readers_with_the_same_snapshot_are_counted_exactly() -> Result<(), Error> {
+    let file = common::RandomFile::new();
+    initialize(&file)?;
+    let db = DB::open(&file)?;
+
+    let readers = (0..64)
+        .map(|_| db.read_tx())
+        .collect::<Result<Vec<_>, _>>()?;
+    let stats = db.stats()?;
+    assert_eq!(stats.active_readers, 64);
+    assert_eq!(stats.oldest_reader_tx_id, Some(1));
+    drop(readers);
+    assert_eq!(db.stats()?.active_readers, 0);
+    Ok(())
+}
+
+#[test]
+fn reader_registration_churn_does_not_interrupt_writers() -> Result<(), Error> {
+    let file = common::RandomFile::new();
+    initialize(&file)?;
+    let readers = (0..4)
+        .map(|_| {
+            let path = file.path.clone();
+            thread::spawn(move || -> Result<(), Error> {
+                let db = DB::open(path)?;
+                for _ in 0..200 {
+                    drop(db.read_tx()?);
+                }
+                Ok(())
+            })
+        })
+        .collect::<Vec<_>>();
 
     let db = DB::open(&file)?;
-    let tx = db.tx(true)?;
-    tx.get_bucket("data")?.put("pid-reuse", "safe")?;
-    tx.commit()?;
-    assert!(!stale.exists());
+    for index in 0_u64..100 {
+        db.update(|tx| {
+            tx.get_bucket("data")?.put("churn", index.to_be_bytes())?;
+            Ok(())
+        })?;
+    }
+    for reader in readers {
+        reader.join().unwrap()?;
+    }
+    db.verify()
+}
+
+#[test]
+#[cfg(any(
+    target_os = "android",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "macos"
+))]
+fn database_coordination_creates_only_the_database_file() -> Result<(), Error> {
+    let directory = common::RandomFile::new();
+    std::fs::create_dir(&directory.path)?;
+    let path = directory.path.join("only.db");
+
+    let db = DB::open(&path)?;
+    db.update(|tx| {
+        tx.create_bucket("data")?.put("key", "value")?;
+        Ok(())
+    })?;
+    let size = path.metadata()?.len();
+    let reader = db.read_tx()?;
+    assert_eq!(db.stats()?.active_readers, 1);
+    drop(reader);
+    assert_eq!(path.metadata()?.len(), size);
+    drop(db);
+
+    let entries = std::fs::read_dir(&directory.path)?.collect::<std::io::Result<Vec<_>>>()?;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].path(), path);
+    std::fs::remove_file(&path)?;
+    std::fs::remove_dir(&directory.path)?;
+    Ok(())
+}
+
+#[test]
+#[cfg(any(target_os = "android", target_os = "linux"))]
+fn renamed_database_keeps_reader_coordination() -> Result<(), Error> {
+    let file = common::RandomFile::new();
+    initialize(&file)?;
+    let db = DB::open(&file)?;
+    let renamed = sibling(&file.path, ".renamed");
+    std::fs::rename(&file.path, &renamed)?;
+
+    let reader = db.read_tx()?;
+    let observer = DB::open(&renamed)?;
+    assert_eq!(observer.stats()?.active_readers, 1);
+    drop(reader);
+    assert_eq!(observer.stats()?.active_readers, 0);
+    drop(observer);
+    drop(db);
+    std::fs::remove_file(renamed)?;
     Ok(())
 }
 

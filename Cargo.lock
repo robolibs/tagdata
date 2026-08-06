@@ -377,7 +377,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha3",
- "windows-sys 0.59.0",
 ]
 
 [[package]]
