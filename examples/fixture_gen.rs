@@ -7,7 +7,6 @@ fn main() -> Result<(), Error> {
     std::fs::create_dir_all(directory)?;
     let path = directory.join("current.db");
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_dir_all(format!("{}.tagdata", path.display()));
     let db = OpenOptions::new().pagesize(4096).num_pages(8).open(&path)?;
     db.update(|tx| {
         let root = tx.create_bucket("fixture")?;
@@ -18,6 +17,5 @@ fn main() -> Result<(), Error> {
     })?;
     db.verify()?;
     drop(db);
-    let _ = std::fs::remove_dir_all(format!("{}.tagdata", path.display()));
     Ok(())
 }

@@ -1,10 +1,17 @@
 # Changelog
 
+## [0.1.3] - 2026-08-06
+
+### <!-- 0 -->⛰️  Features
+
+- Implement single-file OFD coordination
+
 ## [0.1.2] - 2026-08-05
 
 ### <!-- 0 -->⛰️  Features
 
 - Add recursive database and bucket merging
+- Use single-file OFD coordination
 
 ## [0.1.1] - 2026-08-05
 
@@ -86,4 +93,3 @@
 
 - Gate typed benchmark example
 - Define publication compatibility contract
-

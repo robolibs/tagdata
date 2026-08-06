@@ -31,7 +31,7 @@ use crate::{
 };
 
 pub(crate) const MAGIC_VALUE: u32 = 0x00AB_CDEF;
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
 
 /// Controls verification performed while publishing a write transaction.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -225,14 +225,15 @@ impl OpenOptions {
         } else {
             self.pagesize.unwrap_or_else(|| get_page_size() as u64)
         };
+        let max_file_bytes = self
+            .max_file_bytes
+            .unwrap_or(crate::coordination::MAX_DATA_FILE_BYTES)
+            .min(crate::coordination::MAX_DATA_FILE_BYTES);
         let initial_bytes = pagesize.saturating_mul(self.num_pages as u64);
-        if !exists
-            && let Some(maximum) = self.max_file_bytes
-            && initial_bytes > maximum
-        {
+        if !exists && initial_bytes > max_file_bytes {
             return Err(Error::CapacityExceeded {
                 required: initial_bytes,
-                maximum,
+                maximum: max_file_bytes,
             });
         }
         let file = if self.flags.read_only {
@@ -243,11 +244,12 @@ impl OpenOptions {
             open_file(path, false, self.flags.direct_writes, false)?
         };
 
-        if let Some(maximum) = self.max_file_bytes {
-            let required = file.metadata()?.len();
-            if required > maximum {
-                return Err(Error::CapacityExceeded { required, maximum });
-            }
+        let required = file.metadata()?.len();
+        if required > max_file_bytes {
+            return Err(Error::CapacityExceeded {
+                required,
+                maximum: max_file_bytes,
+            });
         }
 
         let verify_on_open = self.flags.verify_on_open;
@@ -257,7 +259,7 @@ impl OpenOptions {
                 pagesize,
                 self.flags,
                 path,
-                self.max_file_bytes,
+                Some(max_file_bytes),
                 self.growth_increment,
             )?),
         };
@@ -672,13 +674,6 @@ fn mmap(file: &File, populate: bool) -> Result<Mmap> {
     Ok(mmap)
 }
 
-// On Windows there is no advice to give.
-#[cfg(windows)]
-fn mmap(file: &File, populate: bool) -> Result<Mmap> {
-    let mmap = unsafe { Mmap::map(file)? };
-    Ok(mmap)
-}
-
 #[cfg(any(target_os = "linux", target_os = "android"))]
 const O_DIRECT: libc::c_int = libc::O_DIRECT;
 
@@ -700,21 +695,6 @@ fn open_file<P: AsRef<Path>>(
     }
     if direct_write {
         open_options.custom_flags(O_DIRECT);
-    }
-    Ok(open_options.open(path)?)
-}
-
-#[cfg(windows)]
-fn open_file<P: AsRef<Path>>(
-    path: P,
-    create: bool,
-    _direct_write: bool,
-    read_only: bool,
-) -> Result<File> {
-    let mut open_options = FileOpenOptions::new();
-    open_options.read(true).write(!read_only);
-    if create {
-        open_options.create_new(true);
     }
     Ok(open_options.open(path)?)
 }

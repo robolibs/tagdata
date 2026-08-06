@@ -10,6 +10,8 @@ See [acknowledgments](ACKOLEGMENT.md) for prior work that informed the project.
   commit and automatic rollback on drop.
 - **Concurrent access:** multiple snapshot readers and one writer across threads
   and processes.
+- **Single-file coordination:** Linux, Android, macOS, and iOS keep gates and
+  live-reader registrations in byte-range locks on the database file itself.
 - **Memory-mapped reads:** values are read directly from the mapped database file.
 - **B+ tree storage:** efficient random lookups and ordered sequential access.
 - **Nested buckets:** byte-key/byte-value namespaces can form arbitrary trees.
@@ -211,9 +213,9 @@ does not replace drive power-loss protection or end-to-end storage hardware.
 Use `OpenOptions::new().read_only()` for a handle that never creates, resizes, or
 writes the database. A read-only handle rejects writable transactions.
 
-Writable handles coordinate through a sibling `.tagdata` directory. Reader
-registrations are removed automatically, including stale registrations left by
-terminated processes. Keep that directory beside the database while it is live.
+Writable handles use kernel-owned locks for writer gates and live-reader
+registrations. Registrations disappear automatically when their transaction is
+dropped or their process terminates.
 
 With `maintenance`, use `DB::backup_to` for an atomically published snapshot,
 `DB::backup_writer` to stream a snapshot, and `DB::compact_to` to rewrite only
@@ -231,6 +233,13 @@ The format persists each freed page's retirement transaction and only reclaims
 pages older than the oldest registered reader. There is no format-selection API
 or legacy-format compatibility path. Files whose format marker differs from the
 current `FORMAT_VERSION` are rejected.
+
+Format version 4 uses open-file-description byte-range locks on the database
+file. Gate, reader-token, and transaction-payload locks live in a reserved range
+far beyond the data and never extend or modify the file. Kernel lock ownership
+removes registrations immediately when a process exits or crashes. Normal read
+and write gates are held per transaction; a handle opened with `read_only()`
+keeps its shared whole-file lock until the handle is dropped.
 
 Offline verification uses a read-only handle:
 

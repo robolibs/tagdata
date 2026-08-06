@@ -89,7 +89,4 @@ fn env_u64(name: &str, default: u64) -> u64 {
 
 fn cleanup(path: &Path) {
     let _ = fs::remove_file(path);
-    let mut sidecar = path.as_os_str().to_owned();
-    sidecar.push(".tagdata");
-    let _ = fs::remove_dir_all(sidecar);
 }

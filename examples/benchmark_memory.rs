@@ -104,7 +104,4 @@ fn record_allocation(bytes: usize) {
 
 fn cleanup(path: &std::path::Path) {
     let _ = fs::remove_file(path);
-    let mut sidecar = path.as_os_str().to_owned();
-    sidecar.push(".tagdata");
-    let _ = fs::remove_dir_all(sidecar);
 }

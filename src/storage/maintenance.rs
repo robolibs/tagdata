@@ -7,9 +7,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::{
-    Bucket, DB, Data, OpenOptions, Result, coordination::sidecar_path, support::failpoints,
-};
+use crate::{Bucket, DB, Data, OpenOptions, Result, support::failpoints};
 
 static TEMP_NONCE: AtomicU64 = AtomicU64::new(0);
 
@@ -95,7 +93,6 @@ fn copy_snapshot(source: &DB, destination: &Path, page_size: u64) -> Result<()> 
     target_tx.commit()?;
     target.check()?;
     drop(target);
-    let _ = std::fs::remove_dir_all(sidecar_path(destination));
     Ok(())
 }
 
@@ -141,7 +138,6 @@ fn temporary_stream_path() -> PathBuf {
 
 fn cleanup(path: &Path) {
     let _ = std::fs::remove_file(path);
-    let _ = std::fs::remove_dir_all(sidecar_path(path));
 }
 
 fn same_path(source: &Path, destination: &Path) -> Result<bool> {
@@ -158,10 +154,5 @@ fn same_path(source: &Path, destination: &Path) -> Result<bool> {
 fn sync_parent(path: &Path) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     File::open(parent)?.sync_all()?;
-    Ok(())
-}
-
-#[cfg(windows)]
-fn sync_parent(_path: &Path) -> Result<()> {
     Ok(())
 }

@@ -5,7 +5,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use crate::{Bucket, DB, Data, Error, OpenOptions, Result, coordination::sidecar_path};
+use crate::{Bucket, DB, Data, Error, OpenOptions, Result};
 
 static OPERATOR_NONCE: AtomicU64 = AtomicU64::new(0);
 
@@ -84,7 +84,6 @@ impl DB {
         }
         target_tx.commit()?;
         target.verify()?;
-        let _ = std::fs::remove_dir_all(sidecar_path(destination));
         Ok(manifest)
     }
 }
@@ -170,16 +169,10 @@ fn temporary_sibling(destination: &Path) -> PathBuf {
 
 fn cleanup(path: &Path) {
     let _ = std::fs::remove_file(path);
-    let _ = std::fs::remove_dir_all(sidecar_path(path));
 }
 
 #[cfg(unix)]
 fn sync_parent(path: &Path) -> Result<()> {
     File::open(path.parent().unwrap_or_else(|| Path::new(".")))?.sync_all()?;
-    Ok(())
-}
-
-#[cfg(windows)]
-fn sync_parent(_path: &Path) -> Result<()> {
     Ok(())
 }
