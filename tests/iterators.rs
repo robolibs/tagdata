@@ -193,14 +193,14 @@ fn check_cursor_starts(fruits: &Vec<&str>, b: &Bucket) {
 fn check_cursor(seek_to: &str, expected_fruits: &[&str], b: &Bucket, start_index: usize) {
     let mut cur_index = 0;
     let mut cursor = b.cursor();
-    let exists = cursor.seek(seek_to);
+    let exists = cursor.seek(seek_to).unwrap();
     if expected_fruits[0] == seek_to {
         assert!(exists);
     }
     for data in cursor {
         assert!(cur_index < expected_fruits.len());
         let expected_fruit = expected_fruits[cur_index];
-        if let Data::KeyValue(kv) = data {
+        if let Data::KeyValue(kv) = data.unwrap() {
             assert_eq!(expected_fruit.as_bytes(), kv.key());
             let value_string = (cur_index + start_index).to_string();
             assert_eq!(value_string.as_bytes(), kv.value());
@@ -234,9 +234,10 @@ fn root_buckets() -> Result<(), Error> {
             tx.commit()?;
         }
         let tx = db.tx(false)?;
-        for (i, (data, bucket)) in tx.buckets().enumerate() {
+        for (i, entry) in tx.buckets().enumerate() {
+            let (data, bucket) = entry?;
             let name = std::str::from_utf8(data.name()).unwrap();
-            let kv = bucket.get_kv("data").unwrap();
+            let kv = bucket.get_kv("data")?.unwrap();
             let value = std::str::from_utf8(kv.value()).unwrap();
             if i == 0 {
                 assert_eq!(name, "abc");
@@ -274,6 +275,7 @@ fn kv_iter() -> Result<(), Error> {
         let tx = db.tx(false)?;
         let b = tx.get_bucket("data")?;
         for ((k, v), kvpair) in data.into_iter().zip(b.kv_pairs()) {
+            let kvpair = kvpair?;
             assert_eq!(k.as_bytes(), kvpair.key());
             assert_eq!(v.as_bytes(), kvpair.value());
         }
@@ -299,25 +301,25 @@ fn point_reads_and_cursors_agree_across_a_deep_tree() -> Result<(), Error> {
         let bucket = tx.get_bucket("deep")?;
         for key in 0..items {
             let encoded = (key * 2).to_be_bytes();
-            assert_eq!(bucket.get_kv(encoded).unwrap().value(), encoded);
+            assert_eq!(bucket.get_kv(encoded)?.unwrap().value(), encoded);
         }
-        assert!(bucket.get_kv([]).is_none());
-        assert!(bucket.get_kv(17_u64.to_be_bytes()).is_none());
-        assert!(bucket.get_kv([u8::MAX; 9]).is_none());
+        assert!(bucket.get_kv([])?.is_none());
+        assert!(bucket.get_kv(17_u64.to_be_bytes())?.is_none());
+        assert!(bucket.get_kv([u8::MAX; 9])?.is_none());
 
         let forward = bucket
             .kv_pairs()
-            .map(|pair| u64::from_be_bytes(pair.key().try_into().unwrap()))
-            .collect::<Vec<_>>();
+            .map(|pair| Ok(u64::from_be_bytes(pair?.key().try_into().unwrap())))
+            .collect::<Result<Vec<_>, Error>>()?;
         assert_eq!(forward.len() as u64, items);
         assert!(forward.windows(2).all(|pair| pair[0] < pair[1]));
 
         let mut cursor = bucket.cursor();
-        assert!(cursor.seek((items * 2 / 3 * 2).to_be_bytes()));
-        assert!(cursor.current().is_some());
-        cursor.seek_last();
+        assert!(cursor.seek((items * 2 / 3 * 2).to_be_bytes())?);
+        assert!(cursor.current()?.is_some());
+        cursor.seek_last()?;
         let mut reverse_count = 0_u64;
-        while cursor.previous().is_some() {
+        while cursor.previous()?.is_some() {
             reverse_count += 1;
         }
         assert_eq!(reverse_count, items);

@@ -164,7 +164,7 @@ fn ttl_visibility_cleanup_and_compaction_are_consistent() -> Result<(), Error> {
     db.update(|tx| {
         let bucket = tx.get_bucket("sessions")?;
         assert_eq!(bucket.purge_expired(after, 10)?, 1);
-        assert!(bucket.get_kv("token").is_none());
+        assert!(bucket.get_kv("token")?.is_none());
         Ok(())
     })?;
     let changes = watch.recv().unwrap();
@@ -188,8 +188,8 @@ fn ttl_can_be_cleared_and_cleanup_is_bounded() -> Result<(), Error> {
         assert!(bucket.clear_ttl("keep")?);
         assert_eq!(bucket.purge_expired(after, 1)?, 1);
         assert!(bucket.get_live_at("keep", after)?.is_some());
-        let remaining = usize::from(bucket.get_kv("first").is_some())
-            + usize::from(bucket.get_kv("second").is_some());
+        let remaining = usize::from(bucket.get_kv("first")?.is_some())
+            + usize::from(bucket.get_kv("second")?.is_some());
         assert_eq!(remaining, 1);
         Ok(())
     })
@@ -216,8 +216,8 @@ fn deadline_index_orders_cleanup_and_database_cleanup_walks_nested_buckets() -> 
     db.view(|tx| {
         let root = tx.get_bucket("root")?;
         assert!(root.get_live_at("a-future", now)?.is_some());
-        assert!(root.get_kv("z-expired").is_none());
-        assert!(root.get_bucket("nested")?.get_kv("expired").is_none());
+        assert!(root.get_kv("z-expired")?.is_none());
+        assert!(root.get_bucket("nested")?.get_kv("expired")?.is_none());
         Ok(())
     })
 }

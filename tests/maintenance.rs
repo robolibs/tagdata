@@ -99,9 +99,13 @@ fn backup_is_one_complete_snapshot_during_a_commit() -> Result<(), Error> {
     let copied = DB::open(&backup)?;
     let tx = copied.tx(false)?;
     let bucket = tx.get_bucket("items")?;
-    let first = bucket.get_kv(0_u64.to_be_bytes()).unwrap().value().to_vec();
+    let first = bucket
+        .get_kv(0_u64.to_be_bytes())?
+        .unwrap()
+        .value()
+        .to_vec();
     for key in 1..5000_u64 {
-        assert_eq!(bucket.get_kv(key.to_be_bytes()).unwrap().value(), first);
+        assert_eq!(bucket.get_kv(key.to_be_bytes())?.unwrap().value(), first);
     }
     copied.check()
 }
@@ -171,15 +175,15 @@ fn populate(db: &DB) -> Result<(), Error> {
 fn assert_database(db: &DB) -> Result<(), Error> {
     let tx = db.tx(false)?;
     let root = tx.get_bucket("root")?;
-    assert_eq!(root.get_kv("keep").unwrap().value(), b"value");
-    assert!(root.get("deleted").is_none());
+    assert_eq!(root.get_kv("keep")?.unwrap().value(), b"value");
+    assert!(root.get("deleted")?.is_none());
     assert_eq!(root.next_int(), 3);
     let nested = root.get_bucket("nested")?;
     assert_eq!(
-        nested.get_kv("number").unwrap().value(),
+        nested.get_kv("number")?.unwrap().value(),
         42_u64.to_be_bytes()
     );
-    assert!(nested.get("removed").is_none());
+    assert!(nested.get("removed")?.is_none());
     assert_eq!(nested.next_int(), 2);
     Ok(())
 }

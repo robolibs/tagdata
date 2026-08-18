@@ -10,6 +10,7 @@ use crate::{
     bucket::{Bucket, InnerBucket},
     changes::{ChangePath, SharedChangeTracker},
     data::Data,
+    errors::Result,
     freelist::TxFreelist,
     page::PageID,
     page_node::PageNodeID,
@@ -39,7 +40,7 @@ use crate::{
 ///
 /// // create a cursor and use it to iterate over the entire bucket
 /// for data in bucket.cursor() {
-///     match data {
+///     match data? {
 ///         Data::Bucket(b) => println!("found a bucket with the name {:?}", b.name()),
 ///         Data::KeyValue(kv) => println!("found a kv pair {:?} {:?}", kv.key(), kv.value()),
 ///     }
@@ -48,7 +49,7 @@ use crate::{
 /// let mut cursor = bucket.cursor();
 /// // seek to the key "f"
 /// // if it doesn't exist, it will start at the position where it should have been
-/// cursor.seek("f");
+/// cursor.seek("f")?;
 /// //
 /// for data in cursor {
 /// }
@@ -88,35 +89,35 @@ impl<'b, 'tx> Cursor<'b, 'tx> {
     /// where the key _would_ be.
     ///
     /// Returns whether or not the key exists in the bucket.
-    pub fn seek<T: AsRef<[u8]>>(&mut self, key: T) -> bool {
+    pub fn seek<T: AsRef<[u8]>>(&mut self, key: T) -> Result<bool> {
         self.next_called = false;
         self.previous_called = false;
         let mut b = self.bucket.borrow_mut();
         if b.deleted {
             panic!("Cannot seek cursor on a deleted bucket.");
         }
-        let (exists, stack) = search(key.as_ref(), b.meta.root_page, &mut b);
+        let (exists, stack) = search(key.as_ref(), b.meta.root_page, &mut b)?;
         self.stack = stack;
-        exists
+        Ok(exists)
     }
 
     /// Returns the data at the cursor's current position.
     /// You can use this to get data after doing a [`seek`](#method.seek).
-    pub fn current<'a>(&'a self) -> Option<Data<'b, 'tx>> {
+    pub fn current<'a>(&'a self) -> Result<Option<Data<'b, 'tx>>> {
         let b = self.bucket.borrow_mut();
         if b.deleted {
             panic!("Cannot get data from a deleted bucket.");
         }
         match self.stack.last() {
             Some(e) => {
-                let n = b.page_node(e.id);
-                n.val(e.index).map(|data| data.into())
+                let n = b.page_node(e.id)?;
+                Ok(n.val(e.index).map(|data| data.into()))
             }
-            None => None,
+            None => Ok(None),
         }
     }
 
-    fn seek_first(&mut self) {
+    fn seek_first(&mut self) -> Result<()> {
         let b = self.bucket.borrow();
         if self.stack.is_empty() {
             self.stack.push(SearchPath {
@@ -126,7 +127,7 @@ impl<'b, 'tx> Cursor<'b, 'tx> {
         }
         loop {
             let elem = self.stack.last().unwrap();
-            let page_node = b.page_node(elem.id);
+            let page_node = b.page_node(elem.id)?;
             if page_node.leaf() {
                 break;
             }
@@ -140,43 +141,46 @@ impl<'b, 'tx> Cursor<'b, 'tx> {
                 id: PageNodeID::Page(page_id),
             });
         }
+        Ok(())
     }
 
     /// Positions the cursor at the greatest key in the bucket.
-    pub fn seek_last(&mut self) {
+    pub fn seek_last(&mut self) -> Result<()> {
         self.stack.clear();
         self.next_called = false;
         self.previous_called = false;
         let b = self.bucket.borrow();
         let mut id = PageNodeID::Page(b.meta.root_page);
         loop {
-            let page_node = b.page_node(id);
+            let page_node = b.page_node(id)?;
             if page_node.len() == 0 {
-                return;
+                return Ok(());
             }
             let index = page_node.len() - 1;
             self.stack.push(SearchPath { index, id });
             if page_node.leaf() {
-                return;
+                return Ok(());
             }
             id = PageNodeID::Page(page_node.index_page(index));
         }
     }
 
     /// Returns the current item and then traverses toward smaller keys.
-    pub fn previous(&mut self) -> Option<Data<'b, 'tx>> {
+    pub fn previous(&mut self) -> Result<Option<Data<'b, 'tx>>> {
         if self.stack.is_empty() {
-            self.seek_last();
+            self.seek_last()?;
         } else if self.previous_called {
             loop {
                 let (moved, descend) = {
                     let b = self.bucket.borrow();
-                    let element = self.stack.last_mut()?;
+                    let Some(element) = self.stack.last_mut() else {
+                        return Ok(None);
+                    };
                     if element.index == 0 {
                         (false, None)
                     } else {
                         element.index -= 1;
-                        let node = b.page_node(element.id);
+                        let node = b.page_node(element.id)?;
                         (
                             true,
                             (!node.leaf())
@@ -187,16 +191,16 @@ impl<'b, 'tx> Cursor<'b, 'tx> {
                 if !moved {
                     self.stack.pop();
                     if self.stack.is_empty() {
-                        return None;
+                        return Ok(None);
                     }
                     continue;
                 }
                 if let Some(mut id) = descend {
                     let b = self.bucket.borrow();
                     loop {
-                        let node = b.page_node(id);
+                        let node = b.page_node(id)?;
                         if node.len() == 0 {
-                            return None;
+                            return Ok(None);
                         }
                         let index = node.len() - 1;
                         self.stack.push(SearchPath { index, id });
@@ -220,37 +224,41 @@ pub(crate) fn search(
     key: &[u8],
     mut page_id: PageID,
     b: &mut InnerBucket,
-) -> (bool, Vec<SearchPath>) {
+) -> Result<(bool, Vec<SearchPath>)> {
     let mut stack = Vec::new();
     loop {
-        let page_node = b.page_node(PageNodeID::Page(page_id));
+        let page_node = b.page_node(PageNodeID::Page(page_id))?;
         let id = page_node.id();
         let (index, exact) = page_node.index(key);
         let leaf = page_node.leaf();
         stack.push(SearchPath { index, id });
         if leaf {
-            return (exact, stack);
+            return Ok((exact, stack));
         }
         let next_page_id = page_node.index_page(index);
         if next_page_id == 0 {
-            return (false, stack);
+            return Ok((false, stack));
         }
         b.add_page_parent(next_page_id, page_id);
         page_id = next_page_id;
     }
 }
 
-pub(crate) fn search_leaf(key: &[u8], mut page_id: PageID, b: &InnerBucket) -> (bool, SearchPath) {
+pub(crate) fn search_leaf(
+    key: &[u8],
+    mut page_id: PageID,
+    b: &InnerBucket,
+) -> Result<(bool, SearchPath)> {
     loop {
-        let page_node = b.page_node(PageNodeID::Page(page_id));
+        let page_node = b.page_node(PageNodeID::Page(page_id))?;
         let id = page_node.id();
         let (index, exact) = page_node.index(key);
         if page_node.leaf() {
-            return (exact, SearchPath { index, id });
+            return Ok((exact, SearchPath { index, id }));
         }
         let next_page_id = page_node.index_page(index);
         if next_page_id == 0 {
-            return (false, SearchPath { index, id });
+            return Ok((false, SearchPath { index, id }));
         }
         page_id = next_page_id;
     }
@@ -263,12 +271,23 @@ pub(crate) struct SearchPath {
 }
 
 impl<'b, 'tx> Iterator for Cursor<'b, 'tx> {
-    type Item = Data<'b, 'tx>;
+    type Item = Result<Data<'b, 'tx>>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        match self.advance() {
+            Ok(Some(data)) => Some(Ok(data)),
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
+        }
+    }
+}
+
+impl<'b, 'tx> Cursor<'b, 'tx> {
+    // The fallible body of Iterator::next.
+    fn advance(&mut self) -> Result<Option<Data<'b, 'tx>>> {
         self.previous_called = false;
         if self.stack.is_empty() {
-            self.seek_first();
+            self.seek_first()?;
         } else if self.next_called {
             loop {
                 {
@@ -277,10 +296,10 @@ impl<'b, 'tx> Iterator for Cursor<'b, 'tx> {
                         panic!("Cannot get data from a deleted bucket.");
                     }
                     let elem = self.stack.last_mut().unwrap();
-                    let page_node = b.page_node(elem.id);
+                    let page_node = b.page_node(elem.id)?;
                     if elem.index >= (page_node.len() - 1) {
                         if self.stack.len() == 1 {
-                            return None;
+                            return Ok(None);
                         }
                         self.stack.pop();
                         continue;
@@ -288,7 +307,7 @@ impl<'b, 'tx> Iterator for Cursor<'b, 'tx> {
                         elem.index += 1;
                     }
                 }
-                self.seek_first();
+                self.seek_first()?;
                 break;
             }
         }
@@ -311,40 +330,34 @@ impl<'r, 'b, 'tx, R> Iterator for Range<'r, 'b, 'tx, R>
 where
     R: RangeBounds<&'r [u8]>,
 {
-    type Item = Data<'b, 'tx>;
+    type Item = Result<Data<'b, 'tx>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if !self.c.next_called
             && let Bound::Included(s) = self.bounds.start_bound()
         {
-            let exists = self.c.seek(*s);
-            if !exists
-                && let Some(data) = self.c.current()
-                && data.key() < *s
-            {
-                self.c.next();
+            let exists = match self.c.seek(*s) {
+                Ok(exists) => exists,
+                Err(e) => return Some(Err(e)),
+            };
+            if !exists {
+                match self.c.current() {
+                    Ok(Some(data)) if data.key() < *s => {
+                        self.c.next();
+                    }
+                    Ok(_) => (),
+                    Err(e) => return Some(Err(e)),
+                }
             }
         }
-        let next = self.c.next();
-        match next {
-            Some(data) => match self.bounds.end_bound() {
-                Bound::Excluded(e) => {
-                    if data.key() < *e {
-                        Some(data)
-                    } else {
-                        None
-                    }
-                }
-                Bound::Included(e) => {
-                    if data.key() <= *e {
-                        Some(data)
-                    } else {
-                        None
-                    }
-                }
-                Bound::Unbounded => Some(data),
-            },
-            None => None,
+        let data = match self.c.next()? {
+            Ok(data) => data,
+            Err(e) => return Some(Err(e)),
+        };
+        match self.bounds.end_bound() {
+            Bound::Excluded(e) => (data.key() < *e).then_some(Ok(data)),
+            Bound::Included(e) => (data.key() <= *e).then_some(Ok(data)),
+            Bound::Unbounded => Some(Ok(data)),
         }
     }
 }
@@ -362,37 +375,41 @@ pub struct Buckets<'b, 'tx, I> {
 
 impl<'b, 'tx: 'b, I> Iterator for Buckets<'b, 'tx, I>
 where
-    I: Iterator<Item = Data<'b, 'tx>>,
+    I: Iterator<Item = Result<Data<'b, 'tx>>>,
 {
-    type Item = (BucketName<'b, 'tx>, Bucket<'b, 'tx>);
+    type Item = Result<(BucketName<'b, 'tx>, Bucket<'b, 'tx>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
         for data in self.i.by_ref() {
+            let data = match data {
+                Ok(data) => data,
+                Err(e) => return Some(Err(e)),
+            };
             if let Data::Bucket(bucket_data) = data {
                 let mut b = self.bucket.borrow_mut();
-                if let Ok(r) = b.get_bucket(&bucket_data) {
-                    let path = self.path.child(bucket_data.name());
-                    return Some((
-                        bucket_data,
-                        Bucket {
-                            writable: self.writable,
-                            freelist: self.freelist.clone(),
-                            inner: r,
-                            path,
-                            changes: self.changes.clone(),
-                            _phantom: PhantomData,
-                        },
-                    ));
-                } else {
-                    panic!("Could not find bucket")
-                }
+                let r = match b.get_bucket(&bucket_data) {
+                    Ok(r) => r,
+                    Err(e) => return Some(Err(e)),
+                };
+                let path = self.path.child(bucket_data.name());
+                return Some(Ok((
+                    bucket_data,
+                    Bucket {
+                        writable: self.writable,
+                        freelist: self.freelist.clone(),
+                        inner: r,
+                        path,
+                        changes: self.changes.clone(),
+                        _phantom: PhantomData,
+                    },
+                )));
             }
         }
         None
     }
 }
 
-pub trait ToBuckets<'b, 'tx: 'b>: Iterator<Item = Data<'b, 'tx>> + Sized {
+pub trait ToBuckets<'b, 'tx: 'b>: Iterator<Item = Result<Data<'b, 'tx>>> + Sized {
     fn to_buckets(self) -> Buckets<'b, 'tx, Self>;
 }
 
@@ -444,21 +461,23 @@ pub struct KVPairs<I> {
 
 impl<'b, 'tx, I> Iterator for KVPairs<I>
 where
-    I: Iterator<Item = Data<'b, 'tx>>,
+    I: Iterator<Item = Result<Data<'b, 'tx>>>,
 {
-    type Item = KVPair<'b, 'tx>;
+    type Item = Result<KVPair<'b, 'tx>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         for data in self.i.by_ref() {
-            if let Data::KeyValue(kv) = data {
-                return Some(kv);
+            match data {
+                Ok(Data::KeyValue(kv)) => return Some(Ok(kv)),
+                Ok(Data::Bucket(_)) => continue,
+                Err(e) => return Some(Err(e)),
             }
         }
         None
     }
 }
 
-pub trait ToKVPairs<'b, 'tx>: Iterator<Item = Data<'b, 'tx>> + Sized {
+pub trait ToKVPairs<'b, 'tx>: Iterator<Item = Result<Data<'b, 'tx>>> + Sized {
     fn to_kv_pairs(self) -> KVPairs<Self>;
 }
 
@@ -503,11 +522,11 @@ mod tests {
             let b = tx.get_bucket("abc")?;
             let mut buckets = b.buckets();
             // We should get the three sub-buckets in order
-            let (data, _) = buckets.next().unwrap();
+            let (data, _) = buckets.next().unwrap()?;
             assert_eq!(data.name(), b"b");
-            let (data, _) = buckets.next().unwrap();
+            let (data, _) = buckets.next().unwrap()?;
             assert_eq!(data.name(), b"d");
-            let (data, _) = buckets.next().unwrap();
+            let (data, _) = buckets.next().unwrap()?;
             assert_eq!(data.name(), b"f");
             // Make sure there are no more buckets
             assert!(buckets.next().is_none());
@@ -519,17 +538,17 @@ mod tests {
             let mut kvpairs = b.kv_pairs();
 
             // We should find the three kv pairs in order
-            let data = kvpairs.next().unwrap();
+            let data = kvpairs.next().unwrap()?;
             let (k, v) = data.kv();
             assert_eq!(k, b"a");
             assert_eq!(v, b"1");
 
-            let data = kvpairs.next().unwrap();
+            let data = kvpairs.next().unwrap()?;
             let (k, v) = data.kv();
             assert_eq!(k, b"c");
             assert_eq!(v, b"3");
 
-            let data = kvpairs.next().unwrap();
+            let data = kvpairs.next().unwrap()?;
             let (k, v) = data.kv();
             assert_eq!(k, b"e");
             assert_eq!(v, b"5");

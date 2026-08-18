@@ -19,7 +19,7 @@ fn typed_and_raw_access_coexist() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(typed.put(&1, &"one".into())?, None);
     assert_eq!(typed.get(&2)?, Some("two".into()));
     assert_eq!(
-        typed.raw().get_kv(1_u64.to_be_bytes()).unwrap().value(),
+        typed.raw().get_kv(1_u64.to_be_bytes())?.unwrap().value(),
         b"one"
     );
     assert_eq!(typed.entries()?, vec![(1, "one".into()), (2, "two".into())]);

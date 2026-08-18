@@ -84,7 +84,8 @@ fn copy_snapshot(source: &DB, destination: &Path, page_size: u64) -> Result<()> 
     let target = OpenOptions::new().pagesize(page_size).open(destination)?;
     let target_tx = target.tx(true)?;
 
-    for (name, source_bucket) in source_tx.buckets() {
+    for entry in source_tx.buckets() {
+        let (name, source_bucket) = entry?;
         let target_bucket = target_tx.create_bucket(name.name().to_vec())?;
         copy_bucket(&source_bucket, &target_bucket)?;
     }
@@ -98,7 +99,7 @@ fn copy_snapshot(source: &DB, destination: &Path, page_size: u64) -> Result<()> 
 
 fn copy_bucket(source: &Bucket<'_, '_>, target: &Bucket<'_, '_>) -> Result<()> {
     for data in source.cursor() {
-        match data {
+        match data? {
             Data::KeyValue(pair) => {
                 target.put(pair.key().to_vec(), pair.value().to_vec())?;
             }

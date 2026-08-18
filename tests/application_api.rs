@@ -45,7 +45,7 @@ fn reusable_collection_supports_typed_crud_and_bounded_scans()
         let users = tx.collection(USERS)?;
         assert_eq!(users.get(&1)?, Some("Ada".into()));
         assert!(users.contains_key(&2)?);
-        assert_eq!(users.len(), 3);
+        assert_eq!(users.len()?, 3);
         assert_eq!(users.multi_get([3, 9])?, vec![Some("Linus".into()), None]);
         assert_eq!(
             users
@@ -90,7 +90,7 @@ fn reusable_collection_supports_typed_crud_and_bounded_scans()
         assert_eq!(users.remove(&2)?, Some("Hopper".into()));
         assert_eq!(users.remove(&2)?, None);
         assert_eq!(users.clear()?, 2);
-        assert!(users.as_read().is_empty());
+        assert!(users.as_read().is_empty()?);
         Ok::<_, TransactionError<CodecError>>(())
     })?;
     Ok(())

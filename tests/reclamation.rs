@@ -30,7 +30,7 @@ fn current_format_persists_retirement_generations_across_handles() -> Result<(),
         Ok(())
     })?;
     assert_eq!(
-        reader.get_bucket("items")?.get_kv("key").unwrap().value()[0],
+        reader.get_bucket("items")?.get_kv("key")?.unwrap().value()[0],
         1
     );
     drop(writer);

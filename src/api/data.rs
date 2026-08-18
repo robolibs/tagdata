@@ -18,7 +18,7 @@ use crate::{ToBytes, bytes::Bytes, node::Leaf};
 /// let mut tx = db.tx(true)?;
 /// let bucket = tx.create_bucket("my-bucket")?;
 ///
-/// if let Some(data) = bucket.get("my-key") {
+/// if let Some(data) = bucket.get("my-key")? {
 ///     match data {
 ///         Data::Bucket(b) => assert_eq!(b.name(), b"my-key"),
 ///         Data::KeyValue(kv) => assert_eq!(kv.key(), b"my-key"),
@@ -87,7 +87,7 @@ impl<'b, 'tx> From<Leaf<'tx>> for Data<'b, 'tx> {
 /// let bucket = tx.create_bucket("my-bucket")?;
 ///
 /// bucket.create_bucket("my-nested-bucket")?;
-/// if let Some(data) = bucket.get("my-nested-bucket") {
+/// if let Some(data) = bucket.get("my-nested-bucket")? {
 ///     if let Data::Bucket(b) = data {
 ///         let name: &[u8] = b.name();
 ///         assert_eq!(name, b"my-nested-bucket");
@@ -148,7 +148,7 @@ impl<'b, 'tx> ToBytes<'tx> for &BucketName<'b, 'tx> {
 ///
 /// // put a key / value pair into the bucket
 /// bucket.put("my-key", "my-value")?;
-/// if let Some(data) = bucket.get("my-key") {
+/// if let Some(data) = bucket.get("my-key")? {
 ///     if let Data::KeyValue(kv) = data {
 ///         let key: &[u8] = kv.key();
 ///         let value: &[u8] = kv.value();

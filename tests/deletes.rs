@@ -63,7 +63,7 @@ fn test_deletes(highest_int: u64) -> Result<(), Error> {
                     }
                 }
                 for i in 0..highest_int {
-                    let data = b.get(i.to_be_bytes());
+                    let data = b.get(i.to_be_bytes())?;
                     if deleted.contains(&i) {
                         assert_eq!(data, None)
                     } else {
@@ -80,7 +80,7 @@ fn test_deletes(highest_int: u64) -> Result<(), Error> {
                 let tx = db.tx(false)?;
                 let b = tx.get_bucket("abc")?;
                 for i in 0..highest_int {
-                    let data = b.get(i.to_be_bytes());
+                    let data = b.get(i.to_be_bytes())?;
                     if deleted.contains(&i) {
                         assert_eq!(data, None)
                     } else {

@@ -27,7 +27,7 @@ fn main() -> Result<(), Error> {
     for number in 0..ITEMS {
         assert!(
             bucket
-                .get_kv(number.to_le_bytes())
+                .get_kv(number.to_le_bytes())?
                 .is_some_and(|pair| pair.value() == number.to_le_bytes())
         );
     }
@@ -112,7 +112,7 @@ fn benchmark_reclamation() -> Result<(), Error> {
     assert!(
         reader
             .get_bucket("churn")?
-            .get_kv(0_u64.to_be_bytes())
+            .get_kv(0_u64.to_be_bytes())?
             .is_some()
     );
     drop(reader);

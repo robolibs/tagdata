@@ -82,7 +82,7 @@ where
     pub fn get(&self, key: &K) -> Result<Option<V>, CodecError> {
         let key = self.codec.encode_key(key)?;
         self.raw
-            .get_kv(key)
+            .get_kv(key)?
             .map(|pair| self.codec.decode_value(pair.value()))
             .transpose()
     }
@@ -106,6 +106,7 @@ where
         self.raw
             .kv_pairs()
             .map(|pair| {
+                let pair = pair?;
                 Ok((
                     self.codec.decode_key(pair.key())?,
                     self.codec.decode_value(pair.value())?,
@@ -124,10 +125,12 @@ where
         self.raw
             .range(start.as_slice()..=end.as_slice())
             .filter_map(|data| match data {
-                Data::KeyValue(pair) => Some(pair),
-                Data::Bucket(_) => None,
+                Ok(Data::KeyValue(pair)) => Some(Ok(pair)),
+                Ok(Data::Bucket(_)) => None,
+                Err(error) => Some(Err(error)),
             })
             .map(|pair| {
+                let pair = pair?;
                 Ok((
                     self.codec.decode_key(pair.key())?,
                     self.codec.decode_value(pair.value())?,

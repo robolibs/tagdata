@@ -225,6 +225,10 @@ impl OpenOptions {
         } else {
             self.pagesize.unwrap_or_else(|| get_page_size() as u64)
         };
+        // The page size read off disk decides where every page starts.
+        if pagesize < 1024 || pagesize % std::mem::align_of::<Page>() as u64 != 0 {
+            return Err(Error::InvalidDB(format!("invalid page size {pagesize}")));
+        }
         let max_file_bytes = self
             .max_file_bytes
             .unwrap_or(crate::coordination::MAX_DATA_FILE_BYTES)
