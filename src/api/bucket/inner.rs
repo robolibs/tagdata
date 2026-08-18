@@ -11,6 +11,8 @@ pub(crate) struct InnerBucket<'b> {
     page_node_ids: HashMap<PageID, NodeID>,
     // Maps PageIDs to their parent's PageID
     page_parents: HashMap<PageID, PageID>,
+    // Pages already checked by node_page, so a traversal validates each one once
+    validated: RefCell<HashSet<PageID>>,
     pages: Pages,
 }
 
@@ -37,6 +39,7 @@ impl<'b> InnerBucket<'b> {
             nodes: Vec::new(),
             page_node_ids: HashMap::new(),
             page_parents: HashMap::new(),
+            validated: RefCell::new(HashSet::new()),
             pages,
         }
     }
@@ -55,6 +58,7 @@ impl<'b> InnerBucket<'b> {
             nodes: vec![Rc::new(RefCell::new(n))],
             page_node_ids,
             page_parents: HashMap::new(),
+            validated: RefCell::new(HashSet::new()),
             pages: self.pages.clone(),
         };
         self.buckets.insert(name.clone(), Rc::new(RefCell::new(b)));
@@ -71,26 +75,37 @@ impl<'b> InnerBucket<'b> {
         self.page_parents.insert(page, parent);
     }
 
-    pub(crate) fn page_node<'a>(&'a self, id: PageNodeID) -> PageNode<'b> {
+    // Resolves a PageID read off disk into a page that is safe to interpret as
+    // a branch or leaf. Every traversal of an on-disk pointer goes through here.
+    fn node_page(&self, id: PageID) -> Result<&'b Page> {
+        if self.validated.borrow().contains(&id) {
+            return Ok(self.pages.page(id));
+        }
+        let page = self.pages.node_page(id)?;
+        self.validated.borrow_mut().insert(id);
+        Ok(page)
+    }
+
+    pub(crate) fn page_node<'a>(&'a self, id: PageNodeID) -> Result<PageNode<'b>> {
         match id {
             PageNodeID::Page(page) => {
                 if let Some(node_id) = self.page_node_ids.get(&page) {
-                    PageNode::Node(self.nodes[*node_id as usize].clone())
+                    Ok(PageNode::Node(self.nodes[*node_id as usize].clone()))
                 } else {
-                    PageNode::Page(self.pages.page(page))
+                    Ok(PageNode::Page(self.node_page(page)?))
                 }
             }
-            PageNodeID::Node(node) => PageNode::Node(self.nodes[node as usize].clone()),
+            PageNodeID::Node(node) => Ok(PageNode::Node(self.nodes[node as usize].clone())),
         }
     }
 
-    pub fn get<'a, T: AsRef<[u8]>>(&'a mut self, key: T) -> Option<Leaf<'b>> {
-        let (exists, leaf) = search_leaf(key.as_ref(), self.meta.root_page, self);
+    pub fn get<'a, T: AsRef<[u8]>>(&'a mut self, key: T) -> Result<Option<Leaf<'b>>> {
+        let (exists, leaf) = search_leaf(key.as_ref(), self.meta.root_page, self)?;
         if exists {
-            let page_node = self.page_node(leaf.id);
-            page_node.val(leaf.index)
+            let page_node = self.page_node(leaf.id)?;
+            Ok(page_node.val(leaf.index))
         } else {
-            None
+            Ok(None)
         }
     }
 
@@ -115,16 +130,16 @@ impl<'b> InnerBucket<'b> {
         &'a mut self,
         key: T,
     ) -> Result<(Bytes<'b>, Bytes<'b>)> {
-        let (exists, stack) = search(key.as_ref(), self.meta.root_page, self);
+        let (exists, stack) = search(key.as_ref(), self.meta.root_page, self)?;
         let last = stack.last().unwrap();
         if exists {
-            let page_node = self.page_node(last.id);
+            let page_node = self.page_node(last.id)?;
             let data = page_node.val(last.index).unwrap();
             if data.is_kv() {
                 let current_id = last.id;
                 let index = last.index;
                 self.dirty = true;
-                let node = self.node(current_id, None);
+                let node = self.node(current_id, None)?;
                 let mut node = node.borrow_mut();
                 match node.delete(index) {
                     Leaf::Kv(k, v) => Ok((k, v)),
@@ -139,10 +154,10 @@ impl<'b> InnerBucket<'b> {
     }
 
     fn put_leaf<'a>(&'a mut self, leaf: Leaf<'b>) -> Result<Option<Leaf<'b>>> {
-        let (exists, stack) = search(leaf.key(), self.meta.root_page, self);
+        let (exists, stack) = search(leaf.key(), self.meta.root_page, self)?;
         let last = stack.last().unwrap();
         let current_data = if exists {
-            let page_node = self.page_node(last.id);
+            let page_node = self.page_node(last.id)?;
             let current = page_node.val(last.index).unwrap();
             if current.is_kv() != leaf.is_kv() {
                 return Err(Error::IncompatibleValue);
@@ -152,7 +167,7 @@ impl<'b> InnerBucket<'b> {
             self.meta.next_int += 1;
             None
         };
-        let node = self.node(last.id, None);
+        let node = self.node(last.id, None)?;
         let mut node = node.borrow_mut();
         node.insert_data(leaf);
         self.dirty = true;
@@ -185,7 +200,7 @@ impl<'b> InnerBucket<'b> {
         must_create: bool,
     ) -> Result<Rc<RefCell<InnerBucket<'b>>>> {
         if !self.buckets.contains_key(&name) {
-            let (exists, stack) = search(name.as_ref(), self.meta.root_page, self);
+            let (exists, stack) = search(name.as_ref(), self.meta.root_page, self)?;
             let last = stack.last().unwrap();
             if !exists {
                 if should_create {
@@ -195,14 +210,14 @@ impl<'b> InnerBucket<'b> {
                         let meta = b.meta;
                         Leaf::Bucket(name.clone(), meta)
                     };
-                    let node = self.node(last.id, None);
+                    let node = self.node(last.id, None)?;
                     let mut node = node.borrow_mut();
                     node.insert_data(leaf);
                 } else {
                     return Err(Error::BucketMissing);
                 }
             } else {
-                let page_node = self.page_node(last.id);
+                let page_node = self.page_node(last.id)?;
                 match page_node.val(last.index) {
                     Some(leaf) => match leaf {
                         Leaf::Bucket(name, meta) => {
@@ -244,7 +259,7 @@ impl<'b> InnerBucket<'b> {
             // we've freed every reachable page starting from this bucket's root page
             remaining_pages.push(b.meta.root_page);
             while let Some(page_id) = remaining_pages.pop() {
-                let page = self.pages.page(page_id);
+                let page = self.node_page(page_id)?;
                 let num_pages = page.overflow + 1;
                 match page.page_type {
                     // every branch element's page much be freed
@@ -268,17 +283,17 @@ impl<'b> InnerBucket<'b> {
             }
         }
         // delete the element from this bucket
-        let (exists, stack) = search(name.as_ref(), self.meta.root_page, self);
+        let (exists, stack) = search(name.as_ref(), self.meta.root_page, self)?;
         let last = stack.last().unwrap();
         if exists {
-            let page_node = self.page_node(last.id);
+            let page_node = self.page_node(last.id)?;
             let data = page_node.val(last.index).unwrap();
 
             if !data.is_kv() {
                 self.dirty = true;
                 let current_id = last.id;
                 let index = last.index;
-                let node = self.node(current_id, None);
+                let node = self.node(current_id, None)?;
                 let mut node = node.borrow_mut();
                 node.delete(index);
                 Ok(())
@@ -294,21 +309,21 @@ impl<'b> InnerBucket<'b> {
         &'a mut self,
         id: PageNodeID,
         parent: Option<&mut Node>,
-    ) -> Rc<RefCell<Node<'b>>> {
+    ) -> Result<Rc<RefCell<Node<'b>>>> {
         let id: NodeID = match id {
             PageNodeID::Page(page_id) => {
                 if let Some(node_id) = self.page_node_ids.get(&page_id) {
-                    return self.nodes[*node_id as usize].clone();
+                    return Ok(self.nodes[*node_id as usize].clone());
                 }
-                debug_assert!(
-                    self.meta.root_page == page_id || self.page_parents.contains_key(&page_id),
-                    "cannot find reference to page ID \"{}\"",
-                    page_id,
-                );
+                if self.meta.root_page != page_id && !self.page_parents.contains_key(&page_id) {
+                    return Err(Error::InvalidDB(format!(
+                        "cannot find reference to page {page_id}"
+                    )));
+                }
+                let page = self.node_page(page_id)?;
                 let node_id = self.nodes.len() as u64;
                 self.page_node_ids.insert(page_id, node_id);
-                let n: Node =
-                    Node::from_page(node_id, self.pages.page(page_id), self.pages.pagesize);
+                let n: Node = Node::from_page(node_id, page, self.pages.pagesize);
                 self.nodes.push(Rc::new(RefCell::new(n)));
                 // If this node is not for the root page, then recursively create nodes for the parent pages
                 if self.meta.root_page != page_id {
@@ -319,7 +334,8 @@ impl<'b> InnerBucket<'b> {
                         parent.insert_child(node_id, node_key);
                         n.parent = Some(parent.id);
                     } else {
-                        let parent = self.node(PageNodeID::Page(self.page_parents[&page_id]), None);
+                        let parent_page = self.page_parents[&page_id];
+                        let parent = self.node(PageNodeID::Page(parent_page), None)?;
                         let mut parent = parent.borrow_mut();
                         parent.insert_child(node_id, node_key);
                         n.parent = Some(parent.id);
@@ -329,7 +345,7 @@ impl<'b> InnerBucket<'b> {
             }
             PageNodeID::Node(id) => id,
         };
-        self.nodes.get_mut(id as usize).unwrap().clone()
+        Ok(self.nodes.get_mut(id as usize).unwrap().clone())
     }
 
     pub(crate) fn new_node<'a>(&'a mut self, data: NodeData<'b>) -> Rc<RefCell<Node<'b>>> {
@@ -366,16 +382,16 @@ impl<'b> InnerBucket<'b> {
         }
 
         // merge emptyish nodes with siblings
-        self.merge_nodes(tx_freelist);
+        self.merge_nodes(tx_freelist)?;
 
         Ok(())
     }
 
-    fn merge_nodes(&mut self, tx_freelist: &mut TxFreelist) {
+    fn merge_nodes(&mut self, tx_freelist: &mut TxFreelist) -> Result<()> {
         // If we haven't initialized any nodes yet, make sure we have the root node.
         // If there is even one node, we are guarunteed to hage loaded the root node too.
         if self.page_node_ids.is_empty() {
-            self.node(PageNodeID::Page(self.meta.root_page), None);
+            self.node(PageNodeID::Page(self.meta.root_page), None)?;
         }
         let mut stack: Vec<(bool, u64)> = vec![(false, self.page_node_ids[&self.meta.root_page])];
 
@@ -446,7 +462,7 @@ impl<'b> InnerBucket<'b> {
 
                             self.page_parents.insert(sibling_page, parent.page_id);
                             let sibling =
-                                self.node(PageNodeID::Page(sibling_page), Some(&mut parent));
+                                self.node(PageNodeID::Page(sibling_page), Some(&mut parent))?;
 
                             let mut sibling = sibling.borrow_mut();
                             // Copy this node's data over to it's sibling
@@ -483,6 +499,7 @@ impl<'b> InnerBucket<'b> {
                 }
             }
         }
+        Ok(())
     }
 
     // Make sure none of the nodes are too full, creating other nodes as needed.

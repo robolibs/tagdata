@@ -10,9 +10,9 @@ fn frozen_current_format_opens_reads_writes_and_verifies() -> Result<(), Error> 
     source.verify()?;
     source.view(|tx| {
         let root = tx.get_bucket("fixture")?;
-        assert_eq!(root.get_kv("message").unwrap().value(), b"frozen");
+        assert_eq!(root.get_kv("message")?.unwrap().value(), b"frozen");
         assert_eq!(
-            root.get_bucket("nested")?.get_kv("key").unwrap().value(),
+            root.get_bucket("nested")?.get_kv("key")?.unwrap().value(),
             b"value"
         );
         Ok(())
@@ -29,7 +29,10 @@ fn frozen_current_format_opens_reads_writes_and_verifies() -> Result<(), Error> 
     db.verify()?;
     db.view(|tx| {
         assert_eq!(
-            tx.get_bucket("fixture")?.get_kv("written").unwrap().value(),
+            tx.get_bucket("fixture")?
+                .get_kv("written")?
+                .unwrap()
+                .value(),
             b"compatible"
         );
         Ok(())

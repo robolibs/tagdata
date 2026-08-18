@@ -44,9 +44,9 @@ fn dropped_write_transaction_restores_updates_and_deletes() -> Result<(), Error>
 
     let tx = db.tx(false)?;
     let bucket = tx.get_bucket("data")?;
-    assert_eq!(bucket.get_kv("stable").unwrap().value(), b"original");
-    assert_eq!(bucket.get_kv("kept").unwrap().value(), b"present");
-    assert!(bucket.get("temporary").is_none());
+    assert_eq!(bucket.get_kv("stable")?.unwrap().value(), b"original");
+    assert_eq!(bucket.get_kv("kept")?.unwrap().value(), b"present");
+    assert!(bucket.get("temporary")?.is_none());
     Ok(())
 }
 
@@ -69,10 +69,10 @@ fn binary_and_empty_data_survive_reopen() -> Result<(), Error> {
     let tx = db.tx(false)?;
     let bucket = tx.get_bucket("binary")?;
     assert_eq!(
-        bucket.get_kv(&binary_key).unwrap().value(),
+        bucket.get_kv(&binary_key)?.unwrap().value(),
         binary_value.as_slice()
     );
-    assert_eq!(bucket.get_kv([]).unwrap().value(), b"");
+    assert_eq!(bucket.get_kv([])?.unwrap().value(), b"");
     db.check()
 }
 
@@ -103,7 +103,7 @@ fn values_crossing_page_boundaries_survive_reopen() -> Result<(), Error> {
     let bucket = tx.get_bucket("pages")?;
     for size in sizes {
         assert_eq!(
-            bucket.get_kv(size.to_be_bytes()).unwrap().value(),
+            bucket.get_kv(size.to_be_bytes())?.unwrap().value(),
             vec![(size % 251) as u8; size]
         );
     }
@@ -135,10 +135,10 @@ fn repeated_replace_and_delete_cycles_remain_valid() -> Result<(), Error> {
     let bucket = tx.get_bucket("cycles")?;
     for key in 0..200_u64 {
         if key % 3 == 0 {
-            assert!(bucket.get(key.to_be_bytes()).is_none());
+            assert!(bucket.get(key.to_be_bytes())?.is_none());
         } else {
             assert_eq!(
-                bucket.get_kv(key.to_be_bytes()).unwrap().value(),
+                bucket.get_kv(key.to_be_bytes())?.unwrap().value(),
                 vec![19; (key as usize % 127) + 1]
             );
         }

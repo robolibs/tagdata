@@ -27,7 +27,7 @@ fn physical_backup_is_byte_exact_and_openable() -> Result<(), Error> {
     assert_eq!(
         copy.read_tx()?
             .get_bucket("records")?
-            .get_kv(7_u64.to_be_bytes())
+            .get_kv(7_u64.to_be_bytes())?
             .unwrap()
             .value(),
         vec![7; 80]

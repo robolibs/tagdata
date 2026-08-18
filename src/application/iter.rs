@@ -46,9 +46,16 @@ where
             let next = if self.reverse {
                 self.cursor.previous()
             } else {
-                self.cursor.next()
+                self.cursor.next().transpose()
             };
-            let Data::KeyValue(pair) = next? else {
+            let next = match next {
+                Ok(next) => next?,
+                Err(error) => {
+                    self.remaining = Some(0);
+                    return Some(Err(error.into()));
+                }
+            };
+            let Data::KeyValue(pair) = next else {
                 continue;
             };
             if let Some(prefix) = &self.prefix

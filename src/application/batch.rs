@@ -111,7 +111,7 @@ impl<'b, 'tx> Batch<'b, 'tx> {
                     }
                 }
                 BatchOperation::Remove { bucket, key } => {
-                    if bucket.get_kv(&key).is_some() {
+                    if bucket.get_kv(&key)?.is_some() {
                         bucket.delete(&key)?;
                     }
                     bucket.clear_ttl(&key)?;

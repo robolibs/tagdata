@@ -65,10 +65,13 @@ impl DB {
                 Err(Error::BucketMissing) => return Ok(JournalReplay::default()),
                 Err(error) => return Err(error),
             };
-            let records = journal
-                .kv_pairs()
-                .filter_map(|pair| decode_tx_key(pair.key()).map(|id| (id, pair.value().to_vec())))
-                .collect::<Vec<_>>();
+            let mut records = Vec::new();
+            for pair in journal.kv_pairs() {
+                let pair = pair?;
+                if let Some(id) = decode_tx_key(pair.key()) {
+                    records.push((id, pair.value().to_vec()));
+                }
+            }
             let oldest_available = records.first().map(|record| record.0);
             let newest_available = records.last().map(|record| record.0);
             let gap = oldest_available
@@ -111,7 +114,7 @@ impl DB {
         let key = checkpoint_key(consumer.as_ref())?;
         self.view(|tx| match tx.get_bucket(JOURNAL_BUCKET) {
             Ok(bucket) => bucket
-                .get_kv(key)
+                .get_kv(key)?
                 .map(|pair| decode_u64(pair.value()))
                 .transpose(),
             Err(Error::BucketMissing) => Ok(None),
@@ -135,14 +138,17 @@ pub(crate) fn persist(tx: &mut TxInner<'_>, changes: &ChangeSet) -> Result<()> {
         _phantom: PhantomData,
     };
     let retention = journal
-        .get_kv(CONFIG_KEY)
+        .get_kv(CONFIG_KEY)?
         .ok_or_else(|| invalid("journal configuration is missing"))
         .and_then(|pair| decode_u64(pair.value()))?;
     journal.put(tx_key(changes.transaction_id), encode_change_set(changes)?)?;
-    let mut keys = journal
-        .kv_pairs()
-        .filter_map(|pair| decode_tx_key(pair.key()).map(|_| pair.key().to_vec()))
-        .collect::<Vec<_>>();
+    let mut keys = Vec::new();
+    for pair in journal.kv_pairs() {
+        let pair = pair?;
+        if decode_tx_key(pair.key()).is_some() {
+            keys.push(pair.key().to_vec());
+        }
+    }
     let remove = keys.len().saturating_sub(retention as usize);
     for key in keys.drain(..remove) {
         journal.delete(key)?;

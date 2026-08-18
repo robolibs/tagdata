@@ -148,7 +148,9 @@ fn run_tagdata(
             let tx = db.read_tx()?;
             let bucket = tx.get_bucket("bench")?;
             for &key in read_keys {
-                let data = bucket.get(key.to_be_bytes()).ok_or("Tagdata key missing")?;
+                let data = bucket
+                    .get(key.to_be_bytes())?
+                    .ok_or("Tagdata key missing")?;
                 black_box(data.kv().key());
                 black_box(data.kv().value());
             }
@@ -160,7 +162,9 @@ fn run_tagdata(
             {
                 let tx = db.read_tx()?;
                 let bucket = tx.get_bucket("bench")?;
-                let data = bucket.get(key.to_be_bytes()).ok_or("Tagdata key missing")?;
+                let data = bucket
+                    .get(key.to_be_bytes())?
+                    .ok_or("Tagdata key missing")?;
                 black_box(data.kv().key());
                 black_box(data.kv().value());
             }
@@ -173,7 +177,9 @@ fn run_tagdata(
             let tx = db.read_tx()?;
             {
                 let bucket = tx.get_bucket("bench")?;
-                let data = bucket.get(key.to_be_bytes()).ok_or("Tagdata key missing")?;
+                let data = bucket
+                    .get(key.to_be_bytes())?
+                    .ok_or("Tagdata key missing")?;
                 black_box(data.kv().value());
             }
             transactions.push(tx);
@@ -187,6 +193,7 @@ fn run_tagdata(
             let bucket = tx.get_bucket("bench")?;
             let mut visited = 0_u64;
             for pair in bucket.kv_pairs() {
+                let pair = pair?;
                 black_box(pair.key());
                 black_box(pair.value());
                 visited += 1;
@@ -212,7 +219,9 @@ fn run_tagdata(
     let tx = db.read_tx()?;
     let bucket = tx.get_bucket("bench")?;
     for &key in reopen_keys {
-        let data = bucket.get(key.to_be_bytes()).ok_or("Tagdata key missing")?;
+        let data = bucket
+            .get(key.to_be_bytes())?
+            .ok_or("Tagdata key missing")?;
         black_box(data.kv().key());
         black_box(data.kv().value());
     }

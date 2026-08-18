@@ -26,7 +26,7 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
 
     #[cfg(feature = "typed")]
     pub(crate) fn key_is_live(&self, key: &[u8]) -> Result<bool> {
-        match self.get_kv(key) {
+        match self.get_kv(key)? {
             Some(expiration) => {
                 Ok(decode_expiration(expiration.value())? > epoch_millis(SystemTime::now())?)
             }
@@ -57,7 +57,7 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
 
     pub(crate) fn set_expiration_millis(&self, key: &[u8], expires_at_millis: u64) -> Result<()> {
         let expirations = self.get_or_create_bucket(TTL_BUCKET)?;
-        if let Some(previous_deadline) = expirations.get_kv(key) {
+        if let Some(previous_deadline) = expirations.get_kv(key)? {
             let previous_deadline = decode_expiration(previous_deadline.value())?;
             remove_deadline(self, previous_deadline, key)?;
         }
@@ -81,12 +81,12 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
     ) -> Result<Option<KVPair<'b, 'tx>>> {
         let key = key.as_ref();
         let Some(expiration) = self.expiration(key)? else {
-            return Ok(self.get_kv(key));
+            return self.get_kv(key);
         };
         if expiration <= epoch_millis(now)? {
             Ok(None)
         } else {
-            Ok(self.get_kv(key))
+            self.get_kv(key)
         }
     }
 
@@ -124,6 +124,7 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
         let deadlines = self.deadline_index(&expirations)?;
         let mut expired = Vec::with_capacity(limit);
         for pair in deadlines.kv_pairs() {
+            let pair = pair?;
             let (deadline, key) = decode_deadline_key(pair.key())?;
             if deadline > now {
                 break;
@@ -136,7 +137,7 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
 
         for (deadline_key, key) in &expired {
             let mut bucket = self.inner.borrow_mut();
-            match bucket.get(key) {
+            match bucket.get(key)? {
                 Some(Leaf::Kv(_, _)) => {
                     bucket.delete(key)?;
                     drop(bucket);
@@ -156,7 +157,7 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
     pub(crate) fn expiration(&self, key: &[u8]) -> Result<Option<u64>> {
         match self.expiration_bucket()? {
             Some(expirations) => expirations
-                .get_kv(key)
+                .get_kv(key)?
                 .map(|pair| decode_expiration(pair.value()))
                 .transpose(),
             None => Ok(None),
@@ -169,6 +170,7 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
             Err(Error::BucketMissing) => {
                 let deadlines = self.create_bucket(TTL_DEADLINES_BUCKET)?;
                 for pair in expirations.kv_pairs() {
+                    let pair = pair?;
                     let deadline = decode_expiration(pair.value())?;
                     deadlines.put(deadline_key(deadline, pair.key()), [])?;
                 }
@@ -188,7 +190,9 @@ impl DB {
         self.update(|tx| {
             let names = tx
                 .buckets()
-                .map(|(name, _)| name.name().to_vec())
+                .map(|entry| Ok(entry?.0.name().to_vec()))
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
                 .filter(|name| !is_ttl_bucket(name))
                 .collect::<Vec<_>>();
             let mut removed = 0;
@@ -214,7 +218,9 @@ fn purge_bucket_tree(bucket: &Bucket<'_, '_>, now: SystemTime, limit: usize) -> 
     }
     let names = bucket
         .buckets()
-        .map(|(name, _)| name.name().to_vec())
+        .map(|entry| Ok(entry?.0.name().to_vec()))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
         .filter(|name| !is_ttl_bucket(name))
         .collect::<Vec<_>>();
     for name in names {

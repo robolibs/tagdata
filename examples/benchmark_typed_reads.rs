@@ -86,6 +86,7 @@ fn time_legacy(raw: &tagdata::Bucket<'_, '_>, expected: u64) -> Result<Duration,
     let started = Instant::now();
     let mut visited = 0;
     for pair in raw.kv_pairs() {
+        let pair = pair?;
         let Some(live) = raw.get_live(pair.key())? else {
             continue;
         };

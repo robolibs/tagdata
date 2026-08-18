@@ -1,6 +1,6 @@
 use std::{
     cell::{RefCell, RefMut},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     marker::PhantomData,
     mem::{align_of, size_of},
     ops::RangeBounds,
@@ -69,7 +69,7 @@ mod tests;
 /// bucket.put([1,2,3], [4,5,6]);
 ///
 /// for data in bucket.cursor() {
-///     match data {
+///     match data? {
 ///         Data::Bucket(b) => println!("found a bucket with the name {:?}", b.name()),
 ///         Data::KeyValue(kv) => println!("found a kv pair {:?} {:?}", kv.key(), kv.value()),
 ///     }
@@ -162,23 +162,23 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
         Ok(previous)
     }
 
-    pub fn get<'a, T: AsRef<[u8]>>(&'a self, key: T) -> Option<Data<'b, 'tx>> {
+    pub fn get<'a, T: AsRef<[u8]>>(&'a self, key: T) -> Result<Option<Data<'b, 'tx>>> {
         let mut b = self.inner.borrow_mut();
         if b.deleted {
             panic!("Cannot get data from a deleted bucket.");
         }
-        b.get(key).map(|data| data.into())
+        Ok(b.get(key)?.map(|data| data.into()))
     }
 
-    pub fn get_kv<'a, T: AsRef<[u8]>>(&'a self, key: T) -> Option<KVPair<'b, 'tx>> {
+    pub fn get_kv<'a, T: AsRef<[u8]>>(&'a self, key: T) -> Result<Option<KVPair<'b, 'tx>>> {
         let mut b = self.inner.borrow_mut();
         if b.deleted {
             panic!("Cannot get data from a deleted bucket.");
         }
-        match b.get(key) {
+        Ok(match b.get(key)? {
             Some(data) => data.into(),
             None => None,
-        }
+        })
     }
 
     /// Deletes a key / value pair from the bucket
@@ -195,11 +195,11 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
     ///
     /// let bucket = tx.get_bucket("my-bucket")?;
     /// // check if data is there
-    /// assert!(bucket.get_kv("some-key").is_some());
+    /// assert!(bucket.get_kv("some-key")?.is_some());
     /// // delete the key / value pair
     /// bucket.delete("some-key")?;
     /// // data should no longer exist
-    /// assert!(bucket.get_kv("some-key").is_none());
+    /// assert!(bucket.get_kv("some-key")?.is_none());
     ///
     /// # Ok(())
     /// # }
@@ -440,7 +440,7 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
     /// let bucket = tx.get_bucket("my-bucket")?;
     ///
     /// for data in bucket.cursor() {
-    ///     match data {
+    ///     match data? {
     ///         Data::Bucket(b) => println!("found a bucket with the name {:?}", b.name()),
     ///         Data::KeyValue(kv) => println!("found a kv pair {:?} {:?}", kv.key(), kv.value()),
     ///     }
@@ -504,12 +504,14 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
     }
 
     /// Iterator over the sub-buckets in this bucket.
-    pub fn buckets<'a>(&'a self) -> impl Iterator<Item = (BucketName<'b, 'tx>, Bucket<'b, 'tx>)> {
+    pub fn buckets<'a>(
+        &'a self,
+    ) -> impl Iterator<Item = Result<(BucketName<'b, 'tx>, Bucket<'b, 'tx>)>> {
         self.cursor().to_buckets()
     }
 
     /// Iterator over the key / value pairs in this bucket.
-    pub fn kv_pairs<'a>(&'a self) -> impl Iterator<Item = KVPair<'b, 'tx>> {
+    pub fn kv_pairs<'a>(&'a self) -> impl Iterator<Item = Result<KVPair<'b, 'tx>>> {
         self.cursor().to_kv_pairs()
     }
 
@@ -527,7 +529,7 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
 
 // and we'll implement IntoIterator
 impl<'b, 'tx> IntoIterator for Bucket<'b, 'tx> {
-    type Item = Data<'b, 'tx>;
+    type Item = Result<Data<'b, 'tx>>;
     type IntoIter = Cursor<'b, 'tx>;
 
     fn into_iter(self) -> Self::IntoIter {

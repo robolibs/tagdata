@@ -53,25 +53,25 @@ fn database_merge_recurses_and_resolves_all_entry_shapes() -> Result<(), Error> 
 
     destination.view(|tx| {
         let alpha = tx.get_bucket("alpha")?;
-        assert_eq!(alpha.get_kv("conflict").unwrap().value(), b"source");
-        assert_eq!(alpha.get_kv("fresh").unwrap().value(), b"source");
+        assert_eq!(alpha.get_kv("conflict")?.unwrap().value(), b"source");
+        assert_eq!(alpha.get_kv("fresh")?.unwrap().value(), b"source");
         assert_eq!(
-            alpha.get_kv("destination-only").unwrap().value(),
+            alpha.get_kv("destination-only")?.unwrap().value(),
             b"destination"
         );
-        assert_eq!(alpha.get_kv("leaf").unwrap().value(), b"source-leaf");
+        assert_eq!(alpha.get_kv("leaf")?.unwrap().value(), b"source-leaf");
         assert_eq!(
-            alpha.get_bucket("node")?.get_kv("inside").unwrap().value(),
+            alpha.get_bucket("node")?.get_kv("inside")?.unwrap().value(),
             b"source"
         );
         let common = alpha.get_bucket("common")?;
-        assert_eq!(common.get_kv("source-only").unwrap().value(), b"source");
+        assert_eq!(common.get_kv("source-only")?.unwrap().value(), b"source");
         assert_eq!(
-            common.get_kv("destination-only").unwrap().value(),
+            common.get_kv("destination-only")?.unwrap().value(),
             b"destination"
         );
         assert_eq!(
-            tx.get_bucket("beta")?.get_kv("key").unwrap().value(),
+            tx.get_bucket("beta")?.get_kv("key")?.unwrap().value(),
             b"value"
         );
         Ok(())
@@ -123,19 +123,22 @@ fn keep_existing_preserves_values_and_entry_types() -> Result<(), Error> {
 
     destination.view(|tx| {
         let root = tx.get_bucket("root")?;
-        assert_eq!(root.get_kv("value").unwrap().value(), b"destination");
+        assert_eq!(root.get_kv("value")?.unwrap().value(), b"destination");
         assert!(
             root.get_live_at("same-ttl", UNIX_EPOCH + Duration::from_secs(150))?
                 .is_some()
         );
-        assert!(matches!(root.get("bucket-to-value"), Some(Data::Bucket(_))));
         assert!(matches!(
-            root.get("value-to-bucket"),
+            root.get("bucket-to-value")?,
+            Some(Data::Bucket(_))
+        ));
+        assert!(matches!(
+            root.get("value-to-bucket")?,
             Some(Data::KeyValue(_))
         ));
         let common = root.get_bucket("common")?;
-        assert_eq!(common.get_kv("conflict").unwrap().value(), b"destination");
-        assert_eq!(common.get_kv("new").unwrap().value(), b"source");
+        assert_eq!(common.get_kv("conflict")?.unwrap().value(), b"destination");
+        assert_eq!(common.get_kv("new")?.unwrap().value(), b"source");
         Ok(())
     })
 }
@@ -167,8 +170,8 @@ fn error_policy_reports_path_and_rolls_back() -> Result<(), Error> {
     );
     destination.view(|tx| {
         let root = tx.get_bucket("root")?;
-        assert!(root.get("a-new").is_none());
-        assert_eq!(root.get_kv("b-conflict").unwrap().value(), b"destination");
+        assert!(root.get("a-new")?.is_none());
+        assert_eq!(root.get_kv("b-conflict")?.unwrap().value(), b"destination");
         Ok(())
     })
 }

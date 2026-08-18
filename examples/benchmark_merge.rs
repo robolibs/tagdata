@@ -146,6 +146,7 @@ fn scan(db: &DB) -> Result<(u64, u64), Box<dyn Error>> {
     let mut count = 0_u64;
     let mut fingerprint = 0_u64;
     for pair in bucket.kv_pairs() {
+        let pair = pair?;
         fingerprint ^= record_fingerprint(pair.key(), pair.value());
         count += 1;
     }

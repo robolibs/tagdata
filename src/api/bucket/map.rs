@@ -3,8 +3,8 @@ use crate::{Data, KVPair, Result, ToBytes};
 use super::Bucket;
 
 impl<'b, 'tx> Bucket<'b, 'tx> {
-    pub fn contains_key(&self, key: impl AsRef<[u8]>) -> bool {
-        self.get_kv(key).is_some()
+    pub fn contains_key(&self, key: impl AsRef<[u8]>) -> Result<bool> {
+        Ok(self.get_kv(key)?.is_some())
     }
 
     pub fn insert<K, V>(&self, key: K, value: V) -> Result<Option<KVPair<'b, 'tx>>>
@@ -16,7 +16,7 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
     }
 
     pub fn remove(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>> {
-        let Some(previous) = self.get_kv(key.as_ref()) else {
+        let Some(previous) = self.get_kv(key.as_ref())? else {
             return Ok(None);
         };
         let previous = previous.value().to_vec();
@@ -24,50 +24,57 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
         Ok(Some(previous))
     }
 
-    pub fn first(&self) -> Option<KVPair<'b, 'tx>> {
-        self.cursor().find_map(|data| match data {
-            Data::KeyValue(pair) => Some(pair),
-            Data::Bucket(_) => None,
-        })
-    }
-
-    pub fn last(&self) -> Option<KVPair<'b, 'tx>> {
-        let mut cursor = self.cursor();
-        cursor.seek_last();
-        while let Some(data) = cursor.previous() {
-            if let Data::KeyValue(pair) = data {
-                return Some(pair);
+    pub fn first(&self) -> Result<Option<KVPair<'b, 'tx>>> {
+        for data in self.cursor() {
+            if let Data::KeyValue(pair) = data? {
+                return Ok(Some(pair));
             }
         }
-        None
+        Ok(None)
     }
 
-    pub fn len(&self) -> usize {
-        self.kv_pairs().count()
+    pub fn last(&self) -> Result<Option<KVPair<'b, 'tx>>> {
+        let mut cursor = self.cursor();
+        cursor.seek_last()?;
+        while let Some(data) = cursor.previous()? {
+            if let Data::KeyValue(pair) = data {
+                return Ok(Some(pair));
+            }
+        }
+        Ok(None)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.kv_pairs().next().is_none()
+    pub fn len(&self) -> Result<usize> {
+        let mut count = 0;
+        for pair in self.kv_pairs() {
+            pair?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    pub fn is_empty(&self) -> Result<bool> {
+        Ok(self.kv_pairs().next().transpose()?.is_none())
     }
 
     pub fn clear(&self) -> Result<usize> {
         let keys = self
             .kv_pairs()
-            .map(|pair| pair.key().to_vec())
-            .collect::<Vec<_>>();
+            .map(|pair| Ok(pair?.key().to_vec()))
+            .collect::<Result<Vec<_>>>()?;
         for key in &keys {
             self.delete(key)?;
         }
         Ok(keys.len())
     }
 
-    pub fn multi_get<I, K>(&self, keys: I) -> Vec<Option<Vec<u8>>>
+    pub fn multi_get<I, K>(&self, keys: I) -> Result<Vec<Option<Vec<u8>>>>
     where
         I: IntoIterator<Item = K>,
         K: AsRef<[u8]>,
     {
         keys.into_iter()
-            .map(|key| self.get_kv(key).map(|pair| pair.value().to_vec()))
+            .map(|key| Ok(self.get_kv(key)?.map(|pair| pair.value().to_vec())))
             .collect()
     }
 
@@ -78,11 +85,13 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
     ) -> Result<usize> {
         let start = start.as_ref();
         let end = end_exclusive.as_ref();
-        let keys = self
-            .kv_pairs()
-            .filter(|pair| pair.key() >= start && pair.key() < end)
-            .map(|pair| pair.key().to_vec())
-            .collect::<Vec<_>>();
+        let mut keys = Vec::new();
+        for pair in self.kv_pairs() {
+            let pair = pair?;
+            if pair.key() >= start && pair.key() < end {
+                keys.push(pair.key().to_vec());
+            }
+        }
         for key in &keys {
             self.delete(key)?;
         }
@@ -91,11 +100,13 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
 
     pub fn delete_prefix(&self, prefix: impl AsRef<[u8]>) -> Result<usize> {
         let prefix = prefix.as_ref();
-        let keys = self
-            .kv_pairs()
-            .filter(|pair| pair.key().starts_with(prefix))
-            .map(|pair| pair.key().to_vec())
-            .collect::<Vec<_>>();
+        let mut keys = Vec::new();
+        for pair in self.kv_pairs() {
+            let pair = pair?;
+            if pair.key().starts_with(prefix) {
+                keys.push(pair.key().to_vec());
+            }
+        }
         for key in &keys {
             self.delete(key)?;
         }
@@ -122,7 +133,7 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
         F: FnOnce(Option<&[u8]>) -> Option<Vec<u8>>,
     {
         let key = key.as_ref().to_vec();
-        let previous = self.get_kv(&key).map(|pair| pair.value().to_vec());
+        let previous = self.get_kv(&key)?.map(|pair| pair.value().to_vec());
         match update(previous.as_deref()) {
             Some(value) => {
                 self.put(key.clone(), value)?;

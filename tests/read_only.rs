@@ -16,7 +16,7 @@ fn read_only_handle_reads_and_rejects_writes() -> Result<(), Error> {
     for db in [&first, &second] {
         let tx = db.tx(false)?;
         let bucket = tx.get_bucket("data")?;
-        assert_eq!(bucket.get_kv("key").unwrap().value(), b"value");
+        assert_eq!(bucket.get_kv("key")?.unwrap().value(), b"value");
     }
     Ok(())
 }
@@ -42,7 +42,7 @@ fn read_only_open_accepts_a_non_writable_file() -> Result<(), Error> {
 
     {
         let db = OpenOptions::new().read_only().open(&file)?;
-        assert!(db.tx(false)?.get_bucket("data")?.get("key").is_some());
+        assert!(db.tx(false)?.get_bucket("data")?.get("key")?.is_some());
     }
 
     let mut permissions = file.path.metadata()?.permissions();
@@ -101,7 +101,7 @@ fn read_only_child() -> Result<(), Error> {
     let db = OpenOptions::new().read_only().open(path)?;
     let tx = db.tx(false)?;
     let bucket = tx.get_bucket("data")?;
-    assert_eq!(bucket.get_kv("key").unwrap().value(), b"value");
+    assert_eq!(bucket.get_kv("key")?.unwrap().value(), b"value");
     std::thread::sleep(Duration::from_millis(250));
     Ok(())
 }

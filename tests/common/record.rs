@@ -130,7 +130,8 @@ impl TestDetails {
             {
                 // Check the database to make sure everything is valid
                 let tx = db.tx(false)?;
-                for (bucket_data, bucket) in tx.buckets() {
+                for entry in tx.buckets() {
+                    let (bucket_data, bucket) = entry?;
                     let data = data.sub_bucket(Bytes::copy_from_slice(bucket_data.name()));
                     assert!(data.is_bucket());
                     let data_bucket = data.unwrap_bucket();
@@ -156,6 +157,7 @@ fn check_bucket(
         let fake_data = data_iter.next();
         match db_data {
             Some(db_data) => {
+                let db_data = db_data?;
                 assert!(fake_data.is_some());
                 let (key, fake_data) = fake_data.unwrap();
 
@@ -364,7 +366,8 @@ pub fn log_playback(name: &str) -> Result<(), Error> {
                     // Check the database to make sure everything is valid
                     let tx = db.tx(false)?;
 
-                    for (bucket_data, bucket) in tx.buckets() {
+                    for entry in tx.buckets() {
+                        let (bucket_data, bucket) = entry?;
                         let data = root.sub_bucket(Bytes::copy_from_slice(bucket_data.name()));
                         assert!(data.is_bucket());
                         let data_bucket = data.unwrap_bucket();

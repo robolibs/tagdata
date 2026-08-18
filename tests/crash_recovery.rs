@@ -40,10 +40,10 @@ fn interrupted_commits_recover_complete_snapshots() -> Result<(), Error> {
         let db = DB::open(&file)?;
         let tx = db.tx(false)?;
         let bucket = tx.get_bucket("state")?;
-        let value = bucket.get_kv("value").unwrap().value().to_vec();
-        let overflow = bucket.get_kv("overflow").unwrap().value().to_vec();
+        let value = bucket.get_kv("value")?.unwrap().value().to_vec();
+        let overflow = bucket.get_kv("overflow")?.unwrap().value().to_vec();
         let nested_bucket = bucket.get_bucket("nested")?;
-        let nested = nested_bucket.get_kv("value").unwrap().value().to_vec();
+        let nested = nested_bucket.get_kv("value")?.unwrap().value().to_vec();
         let observed = if value == b"old" {
             assert_eq!(overflow, vec![3; 64 * 1024], "stage {stage}");
             assert_eq!(nested, b"old", "stage {stage}");
@@ -99,7 +99,7 @@ fn readback_rejects_corrupted_writes_before_publication() -> Result<(), Error> {
         let db = DB::open(&file)?;
         let tx = db.tx(false)?;
         let bucket = tx.get_bucket("state")?;
-        assert_eq!(bucket.get_kv("value").unwrap().value(), b"old");
+        assert_eq!(bucket.get_kv("value")?.unwrap().value(), b"old");
         drop(bucket);
         drop(tx);
         db.check()?;

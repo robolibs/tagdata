@@ -118,7 +118,8 @@ fn merge_transactions(
     options: MergeOptions,
 ) -> Result<MergeReport> {
     let mut report = MergeReport::default();
-    for (name, source_bucket) in source.buckets() {
+    for entry in source.buckets() {
+        let (name, source_bucket) = entry?;
         #[cfg(feature = "changefeed")]
         if name.name() == JOURNAL_BUCKET {
             continue;
@@ -158,6 +159,7 @@ fn merge_bucket(
     let manage_missing_ttl =
         source_expirations.is_some() || destination.expiration_bucket()?.is_some();
     for data in source.cursor() {
+        let data = data?;
         match data {
             Data::KeyValue(pair) => merge_key_value(
                 destination,
@@ -193,11 +195,14 @@ fn merge_key_value(
     value: &[u8],
     merge: EntryMerge<'_>,
 ) -> Result<()> {
-    let source_expiration = source_expirations
-        .and_then(|expirations| expirations.get_kv(key))
-        .map(|expiration| decode_expiration(expiration.value()))
-        .transpose()?;
-    let apply_ttl = match destination.get(key) {
+    let source_expiration = match source_expirations {
+        Some(expirations) => expirations
+            .get_kv(key)?
+            .map(|expiration| decode_expiration(expiration.value()))
+            .transpose()?,
+        None => None,
+    };
+    let apply_ttl = match destination.get(key)? {
         None => {
             destination.put(key.to_vec(), value.to_vec())?;
             merge.report.keys_inserted += 1;
@@ -275,7 +280,7 @@ fn merge_nested_bucket(
     path: &mut Vec<Vec<u8>>,
     report: &mut MergeReport,
 ) -> Result<()> {
-    let destination_bucket = match destination.get(&name) {
+    let destination_bucket = match destination.get(&name)? {
         None => {
             report.buckets_created += 1;
             destination.create_bucket(name.clone())?

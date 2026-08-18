@@ -104,7 +104,8 @@ where
 
     pub fn iter_rev(&self) -> CollectionIter<'b, 'tx, K, V, C> {
         let mut cursor = self.raw.cursor();
-        cursor.seek_last();
+        // Leaves the cursor unpositioned; previous() reports the error again.
+        let _ = cursor.seek_last();
         CollectionIter {
             cursor,
             expirations: self.raw.expiration_bucket(),
@@ -120,7 +121,8 @@ where
 
     pub fn prefix(&self, prefix: &[u8]) -> CollectionIter<'b, 'tx, K, V, C> {
         let mut cursor = self.raw.cursor();
-        cursor.seek(prefix);
+        // Leaves the cursor unpositioned; next() reports the error again.
+        let _ = cursor.seek(prefix);
         CollectionIter {
             cursor,
             expirations: self.raw.expiration_bucket(),
@@ -139,7 +141,7 @@ where
             return Err(CodecError::OrderingRequired);
         }
         let key = self.codec.encode_key(key)?;
-        Ok(self.iter_from_encoded(&key, false))
+        self.iter_from_encoded(&key, false)
     }
 
     pub fn keys(&self) -> impl Iterator<Item = Result<K, CodecError>> + '_ {
@@ -167,7 +169,7 @@ where
             });
         }
         let mut iter = match after {
-            Some(token) => self.iter_from_encoded(token.as_bytes(), true),
+            Some(token) => self.iter_from_encoded(token.as_bytes(), true)?,
             None => self.iter(),
         };
         let mut items = Vec::with_capacity(limit);
@@ -216,7 +218,7 @@ where
             Bound::Unbounded => None,
         };
         let mut iter = match start {
-            Some(start) => self.iter_from_encoded(&start, exclusive),
+            Some(start) => self.iter_from_encoded(&start, exclusive)?,
             None => self.iter(),
         };
         iter.upper_bound = upper_bound;
@@ -234,9 +236,8 @@ where
         let start = self.codec.encode_key(start)?;
         let end = self.codec.encode_key(end_exclusive)?;
         let mut cursor = self.raw.cursor();
-        let exact = cursor.seek(&end);
-        if exact {
-            cursor.previous();
+        if cursor.seek(&end)? {
+            cursor.previous()?;
         }
         Ok(CollectionIter {
             cursor,
@@ -259,23 +260,32 @@ where
         self.iter_rev().next().transpose()
     }
 
-    pub fn len(&self) -> usize {
-        self.raw.kv_pairs().count()
+    pub fn len(&self) -> Result<usize, CodecError> {
+        let mut count = 0;
+        for pair in self.raw.kv_pairs() {
+            pair?;
+            count += 1;
+        }
+        Ok(count)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.raw.kv_pairs().next().is_none()
+    pub fn is_empty(&self) -> Result<bool, CodecError> {
+        Ok(self.raw.kv_pairs().next().transpose()?.is_none())
     }
 
-    fn iter_from_encoded(&self, key: &[u8], exclusive: bool) -> CollectionIter<'b, 'tx, K, V, C> {
+    fn iter_from_encoded(
+        &self,
+        key: &[u8],
+        exclusive: bool,
+    ) -> Result<CollectionIter<'b, 'tx, K, V, C>, CodecError> {
         let mut cursor = self.raw.cursor();
-        let exists = cursor.seek(key);
+        let exists = cursor.seek(key)?;
         let skip_current = (exclusive && exists)
-            || (!exists && cursor.current().is_some_and(|current| current.key() < key));
+            || (!exists && cursor.current()?.is_some_and(|current| current.key() < key));
         if skip_current {
             cursor.next();
         }
-        CollectionIter {
+        Ok(CollectionIter {
             cursor,
             expirations: self.raw.expiration_bucket(),
             codec: self.codec.clone(),
@@ -285,7 +295,7 @@ where
             upper_bound: None,
             reverse: false,
             marker: PhantomData,
-        }
+        })
     }
 }
 
@@ -351,7 +361,7 @@ where
 
     pub fn remove(&self, key: &K) -> Result<Option<V>, CodecError> {
         let key = self.read.codec.encode_key(key)?;
-        let Some(previous) = self.read.raw.get_kv(&key) else {
+        let Some(previous) = self.read.raw.get_kv(&key)? else {
             return Ok(None);
         };
         let value = self.read.codec.decode_value(previous.value())?;
@@ -407,8 +417,8 @@ where
             .read
             .raw
             .kv_pairs()
-            .map(|pair| pair.key().to_vec())
-            .collect::<Vec<_>>();
+            .map(|pair| Ok(pair?.key().to_vec()))
+            .collect::<Result<Vec<_>, CodecError>>()?;
         for key in &keys {
             self.read.raw.delete(key)?;
         }

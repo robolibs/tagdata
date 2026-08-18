@@ -53,19 +53,19 @@ fn snapshot_reader_child() -> Result<(), Error> {
 
     let tx = db.tx(false)?;
     let bucket = tx.get_bucket("data")?;
-    assert_eq!(bucket.get_kv("value").unwrap().value(), b"old");
-    assert!(bucket.get("growth").is_none());
+    assert_eq!(bucket.get_kv("value")?.unwrap().value(), b"old");
+    assert!(bucket.get("growth")?.is_none());
     std::fs::write(&ready, b"ready")?;
     wait_for(&release)?;
-    assert_eq!(bucket.get_kv("value").unwrap().value(), b"old");
-    assert!(bucket.get("growth").is_none());
+    assert_eq!(bucket.get_kv("value")?.unwrap().value(), b"old");
+    assert!(bucket.get("growth")?.is_none());
     drop(bucket);
     drop(tx);
 
     let tx = db.tx(false)?;
     let bucket = tx.get_bucket("data")?;
-    assert_eq!(bucket.get_kv("value").unwrap().value(), b"new");
-    assert_eq!(bucket.get_kv("growth").unwrap().value().len(), 512 * 1024);
+    assert_eq!(bucket.get_kv("value")?.unwrap().value(), b"new");
+    assert_eq!(bucket.get_kv("growth")?.unwrap().value().len(), 512 * 1024);
     Ok(())
 }
 
@@ -94,7 +94,7 @@ fn competing_process_writers_do_not_lose_updates() -> Result<(), Error> {
     let bucket = tx.get_bucket("data")?;
     for index in 0..6 {
         let key = format!("writer-{index}");
-        assert_eq!(bucket.get_kv(key).unwrap().value(), b"committed");
+        assert_eq!(bucket.get_kv(key)?.unwrap().value(), b"committed");
     }
     Ok(())
 }
@@ -306,7 +306,7 @@ fn rapid_open_child() -> Result<(), Error> {
     for _ in 0..30 {
         let db = DB::open(&path)?;
         let tx = db.tx(false)?;
-        assert!(tx.get_bucket("data")?.get("value").is_some());
+        assert!(tx.get_bucket("data")?.get("value")?.is_some());
     }
     Ok(())
 }

@@ -43,8 +43,8 @@ fn named_and_scoped_transactions_commit_only_success() -> Result<(), Error> {
 
     db.view(|tx| {
         let bucket = tx.get_bucket("items")?;
-        assert_eq!(bucket.get_kv("committed").unwrap().value(), b"yes");
-        assert!(bucket.get_kv("rolled-back").is_none());
+        assert_eq!(bucket.get_kv("committed")?.unwrap().value(), b"yes");
+        assert!(bucket.get_kv("rolled-back")?.is_none());
         Ok(())
     })
 }
@@ -175,8 +175,8 @@ fn atomic_bucket_operations_report_success_and_conflicts() -> Result<(), Error> 
 
     db.view(|tx| {
         let bucket = tx.get_bucket("items")?;
-        assert!(bucket.get_kv("key").is_none());
-        assert_eq!(bucket.get_kv("new").unwrap().value(), b"created");
+        assert!(bucket.get_kv("key")?.is_none());
+        assert_eq!(bucket.get_kv("new")?.unwrap().value(), b"created");
         Ok(())
     })
 }
@@ -216,12 +216,12 @@ fn raw_buckets_offer_map_style_bulk_and_boundary_operations() -> Result<(), Erro
             ])?,
             3
         );
-        assert!(map.contains_key("a1"));
-        assert_eq!(map.len(), 3);
-        assert_eq!(map.first().unwrap().key(), b"a1");
-        assert_eq!(map.last().unwrap().key(), b"b1");
+        assert!(map.contains_key("a1")?);
+        assert_eq!(map.len()?, 3);
+        assert_eq!(map.first()?.unwrap().key(), b"a1");
+        assert_eq!(map.last()?.unwrap().key(), b"b1");
         assert_eq!(
-            map.multi_get([b"a1".as_slice(), b"missing".as_slice()]),
+            map.multi_get([b"a1".as_slice(), b"missing".as_slice()])?,
             vec![Some(b"1".to_vec()), None]
         );
         assert_eq!(map.delete_prefix("a"), Ok(2));
@@ -233,10 +233,10 @@ fn raw_buckets_offer_map_style_bulk_and_boundary_operations() -> Result<(), Erro
             })?,
             Some(b"4".to_vec())
         );
-        assert_eq!(map.get_kv("count").unwrap().value(), b"5");
+        assert_eq!(map.get_kv("count")?.unwrap().value(), b"5");
         assert_eq!(map.update_value("count", |_| None)?, Some(b"5".to_vec()));
         assert_eq!(map.remove("b1")?, Some(b"3".to_vec()));
-        assert!(map.is_empty());
+        assert!(map.is_empty()?);
         Ok(())
     })
 }

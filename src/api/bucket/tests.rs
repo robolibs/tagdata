@@ -34,13 +34,13 @@ deleted_bucket_test! {
         let _ = b.put("a", "b");
     })
     deleted_bucket_get: ("Cannot get data from a deleted bucket.", |b: &Bucket| {
-        b.get("a");
+        let _ = b.get("a");
     })
     deleted_bucket_delete: ("Cannot delete data from a deleted bucket.", |b: &Bucket| {
         let _ = b.delete("a");
     })
     deleted_bucket_get_kv: ("Cannot get data from a deleted bucket.", |b: &Bucket| {
-        b.get_kv("a");
+        let _ = b.get_kv("a");
     })
     deleted_bucket_get_bucket: ("Cannot get bucket from a deleted bucket.", |b: &Bucket| {
         let _ = b.get_bucket("a");
@@ -149,7 +149,7 @@ bucket_errors! {
             Ok(_) => panic!("Expected a IncompatibleValue error"),
             Err(e) => assert!(e == Error::IncompatibleValue)
         }
-        assert!(b.get_kv("abc").is_none())
+        assert!(b.get_kv("abc").unwrap().is_none())
     })
 }
 
@@ -177,7 +177,7 @@ fn test_range() -> Result<()> {
                 let k = k.as_bytes();
                 let data = bucket_iter.next();
                 assert!(data.is_some());
-                assert!(data.unwrap().key() == k);
+                assert!(data.unwrap()?.key() == k);
             }
             assert!(bucket_iter.next().is_none());
         };

@@ -71,7 +71,8 @@ impl DB {
                 .extend(report.issues.into_iter().filter_map(|issue| issue.page_id));
         }
 
-        for (name, source_bucket) in source.buckets() {
+        for entry in source.buckets() {
+            let (name, source_bucket) = entry?;
             let name = name.name().to_vec();
             let target_bucket = target_tx.create_bucket(name.clone())?;
             manifest.copied_buckets += 1;
@@ -109,7 +110,7 @@ fn salvage_bucket(
                 break;
             }
         };
-        match data {
+        match data? {
             Data::KeyValue(pair) => {
                 target.put(pair.key().to_vec(), pair.value().to_vec())?;
                 manifest.copied_records += 1;

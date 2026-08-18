@@ -136,9 +136,9 @@ impl<'tx> TxLock<'tx> {
 /// b2.put("new-key", "new-value")?;
 ///
 /// // the read-only transaction will not have this new key
-/// assert_eq!(b1.get("new-key"), None);
+/// assert_eq!(b1.get("new-key")?, None);
 /// // but it will be able to see data that already existed!
-/// assert!(b1.get("existing-key").is_some());
+/// assert!(b1.get("existing-key")?.is_some());
 ///
 /// # Ok(())
 /// # }
@@ -394,7 +394,9 @@ impl<'tx> Tx<'tx> {
     }
 
     /// Iterator over the root level buckets
-    pub fn buckets<'b>(&'b self) -> impl Iterator<Item = (BucketName<'b, 'tx>, Bucket<'b, 'tx>)> {
+    pub fn buckets<'b>(
+        &'b self,
+    ) -> impl Iterator<Item = Result<(BucketName<'b, 'tx>, Bucket<'b, 'tx>)>> {
         let tx = self.inner.borrow();
         let bucket = Bucket {
             inner: tx.root.clone(),

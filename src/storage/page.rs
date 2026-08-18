@@ -1,6 +1,6 @@
 use std::{
     io::Write,
-    mem::size_of,
+    mem::{align_of, size_of},
     slice::{from_raw_parts, from_raw_parts_mut},
     sync::Arc,
 };
@@ -9,6 +9,7 @@ use memmap2::Mmap;
 use sha3::{Digest, Sha3_256};
 
 use crate::{
+    bucket::META_SIZE,
     errors::{Error, Result},
     freelist::RetiredPage,
     meta::Meta,
@@ -43,6 +44,20 @@ impl Pages {
     pub(crate) fn validate(&self, id: PageID) -> Result<&Page> {
         Page::validate_block(&self.data, id, self.pagesize)
     }
+
+    // Resolves a PageID that came off disk. Every page a tree traversal
+    // reaches must come through here rather than through page().
+    pub(crate) fn node_page<'a>(&self, id: PageID) -> Result<&'a Page> {
+        let page = Page::validate_structure(&self.data, id, self.pagesize)?;
+        if !matches!(page.page_type, Page::TYPE_BRANCH | Page::TYPE_LEAF) {
+            return Err(Error::InvalidDB(format!(
+                "page {id} is type {} where a branch or leaf was expected",
+                page.page_type
+            )));
+        }
+        // The mmap outlives every Pages clone, as in page().
+        Ok(unsafe { &*(page as *const Page) })
+    }
 }
 
 #[repr(C)]
@@ -73,7 +88,24 @@ impl Page {
         }
     }
 
+    // Full validation: structure, checksum, and element layout.
     pub(crate) fn validate_block(buf: &[u8], id: PageID, pagesize: u64) -> Result<&Page> {
+        let (page, offset, block_len) = Self::validate_span(buf, id, pagesize)?;
+        verify_checksum(&buf[offset..offset + block_len], id)?;
+        page.validate_layout(block_len - CHECKSUM_SIZE)?;
+        Ok(page)
+    }
+
+    // Structure and element layout without the checksum.
+    pub(crate) fn validate_structure(buf: &[u8], id: PageID, pagesize: u64) -> Result<&Page> {
+        let (page, _, block_len) = Self::validate_span(buf, id, pagesize)?;
+        page.validate_layout(block_len - CHECKSUM_SIZE)?;
+        Ok(page)
+    }
+
+    // Bounds the page header and its overflow block against the mapped file,
+    // returning the page along with its byte offset and block length.
+    fn validate_span(buf: &[u8], id: PageID, pagesize: u64) -> Result<(&Page, usize, usize)> {
         let offset = id
             .checked_mul(pagesize)
             .ok_or_else(|| Error::InvalidDB(format!("page {id} offset overflow")))?;
@@ -84,6 +116,12 @@ impl Page {
         if header_end > buf.len() {
             return Err(Error::InvalidDB(format!(
                 "page {id} is outside the mapped file"
+            )));
+        }
+        // from_buf casts this offset to a *const Page.
+        if offset % align_of::<Page>() != 0 {
+            return Err(Error::InvalidDB(format!(
+                "page {id} starts at unaligned offset {offset}"
             )));
         }
 
@@ -123,9 +161,7 @@ impl Page {
         if block_len < size_of::<Page>() + CHECKSUM_SIZE {
             return Err(Error::InvalidDB(format!("page {id} block is too small")));
         }
-        verify_checksum(&buf[offset..block_end], id)?;
-        page.validate_layout(block_len - CHECKSUM_SIZE)?;
-        Ok(page)
+        Ok((page, offset, block_len))
     }
 
     fn validate_layout(&self, data_limit: usize) -> Result<()> {
@@ -160,6 +196,16 @@ impl Page {
                         return Err(Error::InvalidDB(format!(
                             "page {} leaf {index} has invalid node type {}",
                             self.id, element.node_type
+                        )));
+                    }
+                    // A bucket leaf's value is copied into a BucketMeta, so it
+                    // has to be exactly that wide.
+                    if element.node_type == Node::TYPE_BUCKET
+                        && element.value_size != META_SIZE as u64
+                    {
+                        return Err(Error::InvalidDB(format!(
+                            "page {} leaf {index} is a bucket with a {} byte value",
+                            self.id, element.value_size
                         )));
                     }
                     let element_offset = data_offset + index * size_of::<LeafElement>();

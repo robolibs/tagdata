@@ -114,7 +114,7 @@ fn check_schema<K, V, C>(
     definition: &CollectionDef<K, V, C>,
 ) -> Result<(), CodecError> {
     let expected = schema_bytes(definition);
-    let Some(actual) = schemas.get_kv(schema_key(definition)) else {
+    let Some(actual) = schemas.get_kv(schema_key(definition))? else {
         return Err(CodecError::SchemaMissing {
             collection: definition.name,
         });

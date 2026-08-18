@@ -33,7 +33,7 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
         let change_key = key.clone();
         let value = value.to_bytes();
         let mut bucket = self.inner.borrow_mut();
-        match bucket.get(key.as_ref()) {
+        match bucket.get(key.as_ref())? {
             Some(Leaf::Bucket(_, _)) => Err(Error::IncompatibleValue),
             Some(Leaf::Kv(_, current)) => {
                 let current = current.as_ref().to_vec();
@@ -77,7 +77,7 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
         let change_key = key.clone();
         let value = value.to_bytes();
         let mut bucket = self.inner.borrow_mut();
-        let observed = match bucket.get(key.as_ref()) {
+        let observed = match bucket.get(key.as_ref())? {
             Some(Leaf::Bucket(_, _)) => return Err(Error::IncompatibleValue),
             Some(Leaf::Kv(_, current)) => Some(current.as_ref().to_vec()),
             None => None,
@@ -113,7 +113,7 @@ impl<'b, 'tx> Bucket<'b, 'tx> {
         self.ensure_atomic_write()?;
         let key = key.to_bytes();
         let mut bucket = self.inner.borrow_mut();
-        let observed = match bucket.get(key.as_ref()) {
+        let observed = match bucket.get(key.as_ref())? {
             Some(Leaf::Bucket(_, _)) => return Err(Error::IncompatibleValue),
             Some(Leaf::Kv(_, current)) => Some(current.as_ref().to_vec()),
             None => None,
