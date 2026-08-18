@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.4] - 2026-08-18
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- [**breaking**] Validate page pointers read off disk
+
 ## [0.1.3] - 2026-08-06
 
 ### <!-- 0 -->⛰️  Features
